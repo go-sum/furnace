@@ -8,6 +8,12 @@ github:
   issuer: "https://token.actions.githubusercontent.com"
   audience: "furnace://prod"
 
+# Ops repo that can call management endpoints (add app, etc.)
+management:
+  repo: "yourorg/infra"
+  workflow: ".github/workflows/furnace.yml"
+  allowed_ref: "refs/heads/main"
+
 apps:
   myapp:
     # GitHub repository that is allowed to trigger deployments
@@ -26,6 +32,12 @@ apps:
     # Directory containing the compose file on the VPS
     dir: "/srv/apps/myapp"
 
+    # Public domain for this app (used for Caddy reverse proxy configuration)
+    domain: "myapp.example.com"
+
+    # Port the app's web service listens on (default: 8080)
+    port: 8080
+
     # Docker Compose files (foundry/starter convention)
     # Default when omitted: [docker-compose.data.yml, docker-compose.yml]
     compose_files:
@@ -38,7 +50,7 @@ apps:
     allowed_image_prefix: "ghcr.io/org/repo:"
 
     # Health check endpoint (polled after deployment)
-    health_url: "http://127.0.0.1:8080/health"
+    health_url: "http://myapp-web-1:8080/healthz"
     health_timeout: "30s"
 
     # Phase 2: backup before migration

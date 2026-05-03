@@ -19,6 +19,7 @@ apps:
     allowed_ref: "refs/tags/v*"
     workflow: ".github/workflows/release.yml"
     dir: "/srv/apps/myapp"
+    domain: "myapp.example.com"
     compose_files:
       - "nested/../docker-compose.data.yml"
       - "docker-compose.yml"
@@ -56,6 +57,7 @@ apps:
     allowed_ref: "refs/tags/v*"
     workflow: ".github/workflows/release.yml"
     dir: "/srv/apps/myapp"
+    domain: "myapp.example.com"
     env_file: "../escape.env"
     allowed_image_prefix: "ghcr.io/org/repo:"
     health_url: "http://127.0.0.1:8080/health"
@@ -83,6 +85,7 @@ apps:
     allowed_ref: "refs/tags/v*"
     workflow: ".github/workflows/release.yml"
     dir: "/srv/apps/myapp"
+    domain: "myapp.example.com"
     compose_files:
       - "/tmp/compose.yml"
     allowed_image_prefix: "ghcr.io/org/repo:"
@@ -111,6 +114,7 @@ apps:
     allowed_ref: "refs/tags/v*"
     workflow: ".github/workflows/release.yml"
     dir: "/srv/apps/myapp"
+    domain: "myapp.example.com"
     allowed_image_prefix: "ghcr.io/org/repo:"
     health_url: "ftp://127.0.0.1/health"
 `)
@@ -137,6 +141,7 @@ apps:
     allowed_ref: "refs/tags/v*"
     workflow: ".github/workflows/release.yml"
     dir: "/srv/apps/myapp"
+    domain: "myapp.example.com"
     allowed_image_prefix: "ghcr.io/org/repo:"
     health_url: "http://127.0.0.1:8080/health"
 `
@@ -189,6 +194,7 @@ apps:
     allowed_ref: "refs/tags/v*"
     workflow: ".github/workflows/release.yml"
     dir: "/srv/apps/myapp"
+    domain: "myapp.example.com"
     allowed_image_prefix: "ghcr.io/org/repo:"
     health_url: "http://127.0.0.1:8080/health"
     image_var: "lower_case"
@@ -247,6 +253,97 @@ func TestLoadConfig_DefaultComposeFiles(t *testing.T) {
 	}
 	if appCfg.ComposeFiles[0] != "docker-compose.data.yml" || appCfg.ComposeFiles[1] != "docker-compose.yml" {
 		t.Fatalf("unexpected default compose files: %v", appCfg.ComposeFiles)
+	}
+}
+
+func TestLoadConfig_DefaultPort(t *testing.T) {
+	path := writeConfig(t, validAppConfig("myapp"))
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	appCfg, ok := cfg.AppConfig("myapp")
+	if !ok {
+		t.Fatal("expected app config")
+	}
+	if appCfg.Port != 8080 {
+		t.Fatalf("expected default port 8080, got %d", appCfg.Port)
+	}
+}
+
+func TestLoadConfig_RequiresDomain(t *testing.T) {
+	path := writeConfig(t, `
+listen: "127.0.0.1:8080"
+github:
+  issuer: "https://token.actions.githubusercontent.com"
+  audience: "furnace://prod"
+apps:
+  myapp:
+    repo: "org/repo"
+    allowed_ref: "refs/tags/v*"
+    workflow: ".github/workflows/release.yml"
+    dir: "/srv/apps/myapp"
+    allowed_image_prefix: "ghcr.io/org/repo:"
+    health_url: "http://127.0.0.1:8080/health"
+`)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for missing domain")
+	}
+	expected := "app \"myapp\": domain is required"
+	if err.Error() != expected {
+		t.Fatalf("LoadConfig error mismatch:\ngot  %q\nwant %q", err.Error(), expected)
+	}
+}
+
+func TestLoadConfig_ManagementValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		section string
+		wantErr string
+	}{
+		{
+			"missing workflow",
+			`management:
+  repo: "org/infra"
+  allowed_ref: "refs/heads/main"`,
+			"management: workflow is required",
+		},
+		{
+			"invalid workflow path",
+			`management:
+  repo: "org/infra"
+  workflow: "scripts/deploy.sh"
+  allowed_ref: "refs/heads/main"`,
+			"management: workflow must be a .github/workflows path",
+		},
+		{
+			"missing allowed_ref",
+			`management:
+  repo: "org/infra"
+  workflow: ".github/workflows/furnace.yml"`,
+			"management: allowed_ref is required",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfig(t, `
+listen: "127.0.0.1:8080"
+github:
+  issuer: "https://token.actions.githubusercontent.com"
+  audience: "furnace://prod"
+`+tc.section+`
+apps: {}
+`)
+			_, err := LoadConfig(path)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if err.Error() != tc.wantErr {
+				t.Fatalf("LoadConfig error mismatch:\ngot  %q\nwant %q", err.Error(), tc.wantErr)
+			}
+		})
 	}
 }
 

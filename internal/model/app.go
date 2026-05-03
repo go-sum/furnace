@@ -8,6 +8,8 @@ type AppConfig struct {
 	AllowedRef         string        `yaml:"allowed_ref"`
 	Workflow           string        `yaml:"workflow"`
 	Dir                string        `yaml:"dir"`
+	Domain             string        `yaml:"domain"`
+	Port               int           `yaml:"port"`
 	ComposeFiles       []string      `yaml:"compose_files"`
 	EnvFile            string        `yaml:"env_file"`
 	ImageVar           string        `yaml:"image_var"`

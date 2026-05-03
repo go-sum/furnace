@@ -8,7 +8,7 @@ Requires=docker.service
 Type=simple
 User=furnace
 Group=furnace
-ExecStart=/usr/local/bin/furnace --config /etc/furnace/furnace.yaml
+ExecStart=/usr/local/bin/furnace serve --config /etc/furnace/furnace.yaml
 Restart=on-failure
 RestartSec=5s
 

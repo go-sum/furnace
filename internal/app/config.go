@@ -22,10 +22,11 @@ var (
 )
 
 type Config struct {
-	Listen  string            `yaml:"listen"`
-	DataDir string            `yaml:"data_dir"`
-	GitHub  GitHubConfig      `yaml:"github"`
-	Apps    map[string]AppRaw `yaml:"apps"`
+	Listen     string            `yaml:"listen"`
+	DataDir    string            `yaml:"data_dir"`
+	GitHub     GitHubConfig      `yaml:"github"`
+	Management ManagementConfig  `yaml:"management"`
+	Apps       map[string]AppRaw `yaml:"apps"`
 }
 
 type GitHubConfig struct {
@@ -33,11 +34,19 @@ type GitHubConfig struct {
 	Audience string `yaml:"audience"`
 }
 
+type ManagementConfig struct {
+	Repo       string `yaml:"repo"`
+	Workflow   string `yaml:"workflow"`
+	AllowedRef string `yaml:"allowed_ref"`
+}
+
 type AppRaw struct {
 	Repo               string              `yaml:"repo"`
 	AllowedRef         string              `yaml:"allowed_ref"`
 	Workflow           string              `yaml:"workflow"`
 	Dir                string              `yaml:"dir"`
+	Domain             string              `yaml:"domain"`
+	Port               int                 `yaml:"port"`
 	ComposeFiles       []string            `yaml:"compose_files"`
 	EnvFile            string              `yaml:"env_file"`
 	ImageVar           string              `yaml:"image_var"`
@@ -73,6 +82,12 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("github.audience is required")
 	}
 
+	if cfg.Management.Repo != "" {
+		if err := validateManagement(cfg.Management); err != nil {
+			return nil, fmt.Errorf("management: %w", err)
+		}
+	}
+
 	for name := range cfg.Apps {
 		if !validAppName.MatchString(name) {
 			return nil, fmt.Errorf("app name %q: must be lowercase alphanumeric with hyphens or underscores, max 63 chars", name)
@@ -99,6 +114,8 @@ func (c *Config) AppConfig(name string) (model.AppConfig, bool) {
 		AllowedRef:         raw.AllowedRef,
 		Workflow:           raw.Workflow,
 		Dir:                raw.Dir,
+		Domain:             raw.Domain,
+		Port:               raw.Port,
 		ComposeFiles:       raw.ComposeFiles,
 		EnvFile:            raw.EnvFile,
 		ImageVar:           raw.ImageVar,
@@ -146,6 +163,10 @@ func (c *Config) validateApp(name string) (AppRaw, error) {
 	if !filepath.IsAbs(raw.Dir) {
 		return AppRaw{}, fmt.Errorf("dir must be an absolute path")
 	}
+	if raw.Domain == "" {
+		return AppRaw{}, fmt.Errorf("domain is required")
+	}
+	raw.Port = cmp.Or(raw.Port, 8080)
 	if raw.AllowedImagePrefix == "" {
 		return AppRaw{}, fmt.Errorf("allowed_image_prefix is required")
 	}
@@ -184,6 +205,22 @@ func (c *Config) validateApp(name string) (AppRaw, error) {
 
 	raw.EnvFile = envFile
 	return raw, nil
+}
+
+func validateManagement(m ManagementConfig) error {
+	if m.Workflow == "" {
+		return fmt.Errorf("workflow is required")
+	}
+	if !strings.HasPrefix(m.Workflow, ".github/workflows/") {
+		return fmt.Errorf("workflow must be a .github/workflows path")
+	}
+	if m.AllowedRef == "" {
+		return fmt.Errorf("allowed_ref is required")
+	}
+	if err := auth.ValidateRefPattern(m.AllowedRef); err != nil {
+		return err
+	}
+	return nil
 }
 
 func normalizeRelativePath(value string) (string, error) {
