@@ -1,0 +1,69 @@
+version: '3'
+
+vars:
+  CURRENT_VERSION:
+    sh: git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' | grep . || echo "0.1.0"
+
+tasks:
+  default:
+    desc: "List all available tasks"
+    silent: true
+    cmd: task --list
+
+  git:version:
+    desc: "Bump patch version and tag if changes since last release"
+    cmds:
+      - task: _bump
+        vars: { PART: patch }
+
+  git:minor:
+    desc: "Bump minor version and tag if changes since last release"
+    cmds:
+      - task: _bump
+        vars: { PART: minor }
+
+  git:major:
+    desc: "Bump major version and tag if changes since last release"
+    cmds:
+      - task: _bump
+        vars: { PART: major }
+
+  git:release:
+    desc: "Push latest tag to origin and create a GitHub release"
+    preconditions:
+      - sh: git describe --tags --abbrev=0 2>/dev/null | grep .
+        msg: "No tag found — run git:version, git:minor, or git:major first"
+    cmds:
+      - git push
+      - |
+        TAG=$(git describe --tags --abbrev=0)
+        git push origin "$TAG"
+        gh release create "$TAG" --generate-notes
+
+  _bump:
+    internal: true
+    preconditions:
+      - sh: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null)
+          if [ -z "$LAST_TAG" ]; then exit 0; fi
+          COUNT=$(git log "$LAST_TAG..HEAD" --oneline | wc -l | tr -d '[:space:]')
+          [ "$COUNT" -gt 0 ]
+        msg: "No changes since v{{.CURRENT_VERSION}}"
+    cmds:
+      - |
+        LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null)
+        if [ -z "$LAST_TAG" ]; then
+          NEW="v0.1.0"
+        else
+          VERSION=$(echo "$LAST_TAG" | sed 's/^v//')
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+          case "{{.PART}}" in
+            patch) NEW="v$MAJOR.$MINOR.$((PATCH + 1))" ;;
+            minor) NEW="v$MAJOR.$((MINOR + 1)).0" ;;
+            major) NEW="v$((MAJOR + 1)).0.0" ;;
+          esac
+        fi
+        git tag "$NEW"
+        echo "Tagged $NEW"
