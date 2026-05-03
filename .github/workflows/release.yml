@@ -1,8 +1,9 @@
 name: Release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -34,8 +35,6 @@ jobs:
           go build -ldflags="-s -w" -o furnace-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/furnace
 
       - name: Upload release asset
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload ${{ github.event.release.tag_name }} \
-            furnace-${{ matrix.goos }}-${{ matrix.goarch }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: furnace-${{ matrix.goos }}-${{ matrix.goarch }}

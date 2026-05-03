@@ -29,29 +29,26 @@ tasks:
         vars: { PART: major }
 
   git:release:
-    desc: "Push latest tag to origin and create a GitHub release"
+    desc: "Push commits and latest tag to origin"
     preconditions:
       - sh: git describe --tags --abbrev=0 2>/dev/null | grep .
         msg: "No tag found — run git:version, git:minor, or git:major first"
     cmds:
       - git push
-      - |
-        TAG=$(git describe --tags --abbrev=0)
-        git push origin "$TAG"
-        gh release create "$TAG" --generate-notes
+      - git push origin "$(git describe --tags --abbrev=0)"
 
   _bump:
     internal: true
-    preconditions:
-      - sh: |
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null)
-          if [ -z "$LAST_TAG" ]; then exit 0; fi
-          COUNT=$(git log "$LAST_TAG..HEAD" --oneline | wc -l | tr -d '[:space:]')
-          [ "$COUNT" -gt 0 ]
-        msg: "No changes since v{{.CURRENT_VERSION}}"
     cmds:
       - |
-        LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null)
+        LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+        if [ -n "$LAST_TAG" ]; then
+          COUNT=$(git log "$LAST_TAG..HEAD" --oneline | wc -l | tr -d '[:space:]')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No changes since $LAST_TAG" >&2
+            exit 1
+          fi
+        fi
         if [ -z "$LAST_TAG" ]; then
           NEW="v0.1.0"
         else
