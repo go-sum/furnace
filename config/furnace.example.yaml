@@ -1,0 +1,52 @@
+# Furnace — Secure VPS Deployment Agent
+# Listens on localhost only; use a reverse proxy (Caddy/nginx) for TLS termination.
+
+listen: "127.0.0.1:8080"
+data_dir: "/var/lib/furnace"
+
+github:
+  issuer: "https://token.actions.githubusercontent.com"
+  audience: "furnace://prod"
+
+apps:
+  myapp:
+    # GitHub repository that is allowed to trigger deployments
+    repo: "org/repo"
+
+    # Glob pattern for allowed refs (uses path.Match rules).
+    # * matches any sequence of non-/ characters.
+    # "refs/tags/v*"  → matches refs/tags/v1.0.0 but NOT refs/tags/v1/rc1
+    # "refs/heads/main" → exact branch match
+    # "refs/heads/*"  → any single-segment branch (not release/1.0)
+    allowed_ref: "refs/tags/v*"
+
+    # Only allow deployments from this workflow file
+    workflow: ".github/workflows/release.yml"
+
+    # Directory containing the compose file on the VPS
+    dir: "/srv/apps/myapp"
+
+    # Docker Compose files (foundry/starter convention)
+    # Default when omitted: [docker-compose.data.yml, docker-compose.yml]
+    compose_files:
+      - docker-compose.data.yml
+      - docker-compose.yml
+    env_file: ".deploy.env"
+    image_var: "APP_IMAGE"
+
+    # Only images with this prefix are accepted
+    allowed_image_prefix: "ghcr.io/org/repo:"
+
+    # Health check endpoint (polled after deployment)
+    health_url: "http://127.0.0.1:8080/health"
+    health_timeout: "30s"
+
+    # Phase 2: backup before migration
+    # backup:
+    #   enabled: true
+    #   args: ["compose", "exec", "-T", "db", "pg_dump", "-U", "postgres", "-Fc", "myapp"]
+
+    # Phase 2: run migrations before starting new containers
+    # migrate:
+    #   enabled: true
+    #   args: ["compose", "run", "--rm", "app", "./app", "migrate"]

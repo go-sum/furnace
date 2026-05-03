@@ -1,0 +1,14 @@
+.DS_Store
+
+.claude
+.codex
+.mcp.json
+.projects/
+.plans
+.task/
+
+bin/
+tmp/
+
+*.test
+*.out
