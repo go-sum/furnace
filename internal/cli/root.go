@@ -32,6 +32,8 @@ func NewRootCommand() *cobra.Command {
 		newWorkerCmd(&configPath),
 		newProxyCmd(&configPath),
 		newValidateCmd(&configPath),
+		newResetCmd(),
+		newMkcertCmd(&configPath),
 	)
 
 	return root

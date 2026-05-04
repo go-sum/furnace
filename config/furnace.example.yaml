@@ -1,47 +1,11 @@
-# Furnace — Secure VPS Deployment Agent
-# Edit this file during initial setup (one-time SSH), then close SSH.
-# Furnace polls GHCR every poll_interval and deploys signed images automatically.
-
 data_dir: "/var/lib/furnace"
-
-# How often to check each app's registry for a new image tag.
-# The /v1/apps/{app}/deploy endpoint can short-circuit this to 1s.
 poll_interval: "60s"
 
 apps:
-  myapp:
-    # Base image reference (without tag). The worker resolves the latest tag
-    # matching tag_pattern from this registry path.
-    image: "ghcr.io/yourorg/myapp"
-
-    # Glob pattern (path.Match rules) for which tags to watch.
-    # "v*" matches v1.0.0, v1.2.3 — any tag starting with v.
+  furnace-web:
+    image: "ghcr.io/go-sum/furnace"
     tag_pattern: "v*"
-
-    # GitHub repository whose Sigstore OIDC identity must sign the image.
-    # Only images signed by a GitHub Actions workflow from this repo are accepted.
-    allowed_identity: "yourorg/myapp"
-
-    # Public domain for this app (used to generate the Caddyfile).
-    domain: "myapp.example.com"
-
-    # Port the app's web container listens on (default: 8080).
-    port: 8080
-
-    # Absolute path to the app directory on the VPS.
-    dir: "/srv/apps/myapp"
-
-    # Docker Compose files relative to dir (foundry/starter convention).
-    # Default when omitted: [docker-compose.data.yml, docker-compose.yml]
-    compose_files:
-      - docker-compose.data.yml
-      - docker-compose.yml
-
-    # Env file and variable written by furnace on each deploy.
-    env_file: ".deploy.env"
-    image_var: "APP_IMAGE"
-
-    # Health check endpoint polled after docker compose up.
-    # Uses container DNS — app containers are reachable on caddy_net.
-    health_url: "http://myapp-web-1:8080/healthz"
-    health_timeout: "30s"
+    allowed_identity: "go-sum/furnace"
+    domain: "furnace.server"
+    dir: "/srv/apps/furnace-web"
+    health_url: "http://furnace-web-web-1:8080/v1/health"

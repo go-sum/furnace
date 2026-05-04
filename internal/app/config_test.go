@@ -236,7 +236,7 @@ apps: {}
 }
 
 func TestLoadConfig_ValidDomains(t *testing.T) {
-	for _, domain := range []string{"myapp.example.com", "sub.deep.example.co.uk", "a.io"} {
+	for _, domain := range []string{"myapp.example.com", "sub.deep.example.co.uk", "a.io", "furnace.server"} {
 		t.Run(domain, func(t *testing.T) {
 			path := writeConfig(t, `
 data_dir: "/var/lib/furnace"

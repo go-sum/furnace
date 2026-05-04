@@ -15,6 +15,8 @@ A pull-based deployment agent for VPS servers. You SSH in once to bootstrap it, 
 - [Adding an App](#adding-an-app)
 - [The Deploy Hint Endpoint](#the-deploy-hint-endpoint)
 - [Monitoring](#monitoring)
+- [Teardown](#teardown)
+- [CLI Reference](#cli-reference)
 - [Configuration Reference](#configuration-reference)
 - [Data Layout](#data-layout)
 - [Security Model](#security-model)
@@ -155,13 +157,16 @@ sudo furnace init
 ```
 
 This creates:
-- System user `furnace` (added to the `docker` group)
-- `/etc/furnace/furnace.yaml` — config scaffold (only on first run)
-- `/var/lib/furnace/` — deployment records, audit logs, locks
-- `/srv/apps/` — app directories
-- `/srv/furnace/proxy/` — Caddy reverse proxy compose setup
-- `/srv/furnace/certs/` — TLS certificates
-- `caddy_net` Docker bridge network
+```bash
+    user `furnace`  # added to the `docker` group
+    
+    /etc/furnace/furnace.yaml # config scaffold (only on first run)
+    /var/lib/furnace/ # deployment records, audit logs, locks
+    /srv/apps/ # app directories
+    /srv/furnace/proxy/ # Caddy reverse proxy compose setup
+    /srv/furnace/certs/ # TLS certificates
+    caddy_net # Docker bridge network
+```
 
 ### 3. Provision app directories
 
@@ -175,7 +180,9 @@ cp docker-compose.yml docker-compose.data.yml /srv/apps/myapp/
 ### 4. Edit the config
 
 ```bash
-nano /etc/furnace/furnace.yaml
+sudo nano /etc/furnace/furnace.yaml
+  or
+sudo vi /etc/furnace/furnace.yaml
 ```
 
 Add each app you want to deploy, including `furnace-web` itself:
@@ -208,17 +215,24 @@ Validate the config before starting:
 furnace validate
 ```
 
-For staging TLS with mkcert:
+### 5. Generate TLS certificates (staging)
+
+For staging or local TLS, use the built-in cert generator. It creates a self-signed CA and installs it to the system trust store, then generates a server certificate covering all app domains from your config.
 
 ```bash
-mkcert -install
-mkcert -cert-file /srv/furnace/certs/local.pem -key-file /srv/furnace/certs/local-key.pem \
-  furnace.example.com myapp.example.com
+sudo furnace mkcert --install      # generate CA, install to system trust store
+sudo furnace mkcert                # generate server cert for all apps in config
+```
+
+Or generate a cert for specific apps only:
+
+```bash
+sudo furnace mkcert furnace-web myapp
 ```
 
 For production, use a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) — Cloudflare handles TLS and Caddy runs with `auto_https off`.
 
-### 5. Start everything
+### 6. Start everything
 
 ```bash
 sudo furnace start
@@ -233,7 +247,7 @@ This single command:
 
 The worker begins polling immediately. On the first cycle it will find and deploy all apps in your config, including `furnace-web`.
 
-### 6. Close SSH
+### 7. Close SSH
 
 All further updates happen automatically — the worker polls GHCR and deploys new releases as they appear. You can harden the VPS now: close unused ports and disable password authentication.
 
@@ -245,6 +259,7 @@ To add a new app after initial setup:
 2. Add the app entry to `/etc/furnace/furnace.yaml`
 3. Run `sudo furnace proxy init` to regenerate the Caddyfile
 4. Run `sudo furnace proxy up` to reload Caddy with the new route
+5. Run `sudo furnace mkcert` to regenerate the server cert with the new domain
 
 The worker picks up new apps on its next poll cycle — no restart required.
 
@@ -305,6 +320,49 @@ Every deployment start, success, and failure is appended to a JSONL file:
 tail -20 /var/lib/furnace/audit/*.jsonl | jq .
 ```
 
+## Teardown
+
+`furnace reset` removes everything furnace installed from the VPS. It requires root and prompts for explicit confirmation.
+
+```bash
+sudo furnace reset
+```
+
+What it removes:
+- Stops and disables the `furnace-worker` systemd unit
+- Removes `/etc/systemd/system/furnace-worker.service` and reloads systemd
+- Brings down the Caddy proxy (`docker compose down`)
+- Removes the `caddy_net` Docker network
+- Removes the system CA (`/usr/local/share/ca-certificates/furnace-ca.crt`) and runs `update-ca-certificates`
+- Removes all furnace directories: `/etc/furnace`, `/var/lib/furnace`, `/srv/apps`, `/srv/furnace`
+- Deletes the `furnace` system user
+
+`furnace reset` is the inverse of `furnace init` + `furnace start`. It does not uninstall the `furnace` binary from `/usr/local/bin`.
+
+## CLI Reference
+
+```
+furnace [--config <path>] <command>
+```
+
+Global flag: `--config` sets the config file path (default: `/etc/furnace/furnace.yaml`).
+
+| Command | Requires root | Description |
+|---------|--------------|-------------|
+| `furnace init` | yes | Create system user, directories, config scaffold, and `caddy_net` network. Idempotent. |
+| `furnace start` | yes | Write systemd unit, start Caddy proxy, enable and start worker. |
+| `furnace reset` | yes | Remove all furnace state — inverse of `init` + `start`. Prompts for confirmation. |
+| `furnace validate` | no | Parse and validate the config file; print app count. |
+| `furnace mkcert --install` | yes | Generate ECDSA P-256 CA, write to `/var/lib/furnace/ca/`, install to system trust store. Skips if CA already exists. |
+| `furnace mkcert [app...]` | yes | Generate server cert for all apps (or named apps) from config. Writes to `/srv/furnace/certs/local.pem` and `local-key.pem`. Requires CA from `--install`. |
+| `furnace proxy init` | no | Regenerate Caddyfile and `compose.yml` from current config. |
+| `furnace proxy up` | no | Start (or restart) the Caddy container (`docker compose up -d`). |
+| `furnace proxy status` | no | Show Caddy container status (`docker compose ps`). |
+| `furnace web [--listen addr]` | no | Run the furnace-web HTTP server (default `:8080`). Handles graceful shutdown on SIGINT/SIGTERM. |
+| `furnace worker` | no | Run the furnace-worker poll loop. Handles graceful shutdown on SIGINT/SIGTERM. |
+
+`furnace web` and `furnace worker` are the subcommands run by the Docker container and systemd unit respectively — they are not typically invoked directly by the operator.
+
 ## Configuration Reference
 
 `/etc/furnace/furnace.yaml`:
@@ -362,6 +420,9 @@ Use `furnace validate` to check your config file for errors without starting the
   furnace.yaml              # app configuration
 
 /var/lib/furnace/
+  ca/
+    ca.pem                  # furnace CA certificate (created by mkcert --install)
+    ca-key.pem              # furnace CA private key (0600)
   deployments/
     myapp/
       01JVABCDEF....json    # per-deployment records (latest 20 kept)
@@ -385,8 +446,11 @@ Use `furnace validate` to check your config file for errors without starting the
   Caddyfile                 # regenerated by furnace on app add/remove
 
 /srv/furnace/certs/
-  local.pem                 # TLS cert (mkcert for staging)
-  local-key.pem             # TLS key
+  local.pem                 # TLS cert (created by furnace mkcert)
+  local-key.pem             # TLS key (0600)
+
+/usr/local/share/ca-certificates/
+  furnace-ca.crt            # system trust store entry (created by mkcert --install)
 ```
 
 ## Security Model
@@ -404,6 +468,7 @@ Use `furnace validate` to check your config file for errors without starting the
 - **Flock-based deploy lock.** One deployment per app at a time, survives process restarts.
 - **Env file rollback.** On failure, `.deploy.env` is restored so the next compose up uses the last known-good image.
 - **Audit trail.** All deployment events logged to append-only JSONL.
+- **Self-signed CA via stdlib crypto.** `furnace mkcert` generates ECDSA P-256 certificates using Go's `crypto/x509` — no external tools or dependencies required. The CA key is stored at `0600`. The system CA entry is removed by `furnace reset`.
 - **Status endpoint exposure.** The `/v1/apps/{app}/status` endpoint returns deployment metadata. Restrict access to trusted networks via firewall rules or a Cloudflare Tunnel access policy if your VPS is publicly reachable.
 
 ## License
