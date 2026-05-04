@@ -11,56 +11,68 @@ tasks:
     cmd: task --list
 
   git:version:
-    desc: "Bump patch version and tag if changes since last release"
+    desc: "Bump patch version and tag if commits since last release"
+    silent: true
     cmds:
       - task: _bump
         vars: { PART: patch }
 
   git:minor:
-    desc: "Bump minor version and tag if changes since last release"
+    desc: "Bump minor version and tag if commits since last release"
+    silent: true
     cmds:
       - task: _bump
         vars: { PART: minor }
 
   git:major:
-    desc: "Bump major version and tag if changes since last release"
+    desc: "Bump major version and tag if commits since last release"
+    silent: true
     cmds:
       - task: _bump
         vars: { PART: major }
 
   git:release:
     desc: "Push commits and latest tag to origin"
+    silent: true
     preconditions:
       - sh: git describe --tags --abbrev=0 2>/dev/null | grep .
         msg: "No tag found — run git:version, git:minor, or git:major first"
     cmds:
-      - git push
-      - git push origin "$(git describe --tags --abbrev=0)"
+      - "@git push"
+      - "@git push origin \"$(git describe --tags --abbrev=0)\""
 
   _bump:
     internal: true
+    silent: true
     cmds:
-      - |
-        LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
-        if [ -n "$LAST_TAG" ]; then
-          COUNT=$(git log "$LAST_TAG..HEAD" --oneline | wc -l | tr -d '[:space:]')
-          if [ "$COUNT" -eq 0 ]; then
-            echo "No changes since $LAST_TAG" >&2
-            exit 1
+      - cmd: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -n "$LAST_TAG" ]; then
+            COUNT=$(git log "$LAST_TAG..HEAD" --oneline | wc -l | tr -d '[:space:]')
+            if [ "$COUNT" -eq 0 ]; then
+              echo "No committed changes since $LAST_TAG"
+              exit 1
+            fi
+          else
+            COUNT=$(git log --oneline | wc -l | tr -d '[:space:]')
+            if [ "$COUNT" -eq 0 ]; then
+              echo "No commits found"
+              exit 1
+            fi
           fi
-        fi
-        if [ -z "$LAST_TAG" ]; then
-          NEW="v0.1.0"
-        else
-          VERSION=$(echo "$LAST_TAG" | sed 's/^v//')
-          MAJOR=$(echo "$VERSION" | cut -d. -f1)
-          MINOR=$(echo "$VERSION" | cut -d. -f2)
-          PATCH=$(echo "$VERSION" | cut -d. -f3)
-          case "{{.PART}}" in
-            patch) NEW="v$MAJOR.$MINOR.$((PATCH + 1))" ;;
-            minor) NEW="v$MAJOR.$((MINOR + 1)).0" ;;
-            major) NEW="v$((MAJOR + 1)).0.0" ;;
-          esac
-        fi
-        git tag "$NEW"
-        echo "Tagged $NEW"
+          if [ -z "$LAST_TAG" ]; then
+            NEW="v0.1.0"
+          else
+            VERSION=$(echo "$LAST_TAG" | sed 's/^v//')
+            MAJOR=$(echo "$VERSION" | cut -d. -f1)
+            MINOR=$(echo "$VERSION" | cut -d. -f2)
+            PATCH=$(echo "$VERSION" | cut -d. -f3)
+            case "{{.PART}}" in
+              patch) NEW="v$MAJOR.$MINOR.$((PATCH + 1))" ;;
+              minor) NEW="v$MAJOR.$((MINOR + 1)).0" ;;
+              major) NEW="v$((MAJOR + 1)).0.0" ;;
+            esac
+          fi
+          git tag "$NEW"
+          echo "Tagged $NEW"
+        silent: true

@@ -121,17 +121,14 @@ func ensureConfigScaffold() error {
 }
 
 func ensureDockerNetwork(name string) error {
-	out, err := exec.Command("docker", "network", "inspect", name).CombinedOutput()
+	out, err := exec.Command("docker", "network", "create", name).CombinedOutput()
 	if err == nil {
+		fmt.Printf("created  docker network %s\n", name)
+		return nil
+	}
+	if strings.Contains(string(out), "already exists") {
 		fmt.Printf("exists   docker network %s\n", name)
 		return nil
 	}
-	if !strings.Contains(string(out), "No such network") {
-		return fmt.Errorf("inspect network: %w", err)
-	}
-	if err := exec.Command("docker", "network", "create", name).Run(); err != nil {
-		return fmt.Errorf("create network: %w", err)
-	}
-	fmt.Printf("created  docker network %s\n", name)
-	return nil
+	return fmt.Errorf("create network %s: %w\n%s", name, err, out)
 }
