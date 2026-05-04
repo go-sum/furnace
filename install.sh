@@ -75,6 +75,11 @@ curl -fsSL --progress-bar "${BASE_URL}/${ASSET}" -o "${TMPDIR}/${BINARY}"
 echo "Downloading ${BUNDLE}..."
 curl -fsSL --progress-bar "${BASE_URL}/${BUNDLE}" -o "${TMPDIR}/${BUNDLE}"
 
+# cosign runs as nonroot inside the container — make the tmpdir and files
+# world-readable so the container can traverse and open them.
+chmod 755 "${TMPDIR}"
+chmod 644 "${TMPDIR}/${BINARY}" "${TMPDIR}/${BUNDLE}"
+
 # ── 4. Verify Sigstore signature ──────────────────────────────────────────────
 # cosign runs inside a Docker container — Docker is already required to run
 # furnace so this adds no new dependencies to the bootstrap path.
