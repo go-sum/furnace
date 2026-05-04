@@ -10,7 +10,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-      - /opt/vps/certs:/certs:ro
+      - /srv/furnace/certs:/certs:ro
     networks:
       - caddy_net
 

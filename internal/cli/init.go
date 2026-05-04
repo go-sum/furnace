@@ -13,6 +13,28 @@ import (
 	furnaceconfig "github.com/go-sum/furnace/config"
 )
 
+type dirOwner int
+
+const (
+	ownerRoot        dirOwner = iota // root:root
+	ownerFurnace                     // furnace:furnace
+	ownerRootFurnace                 // root:furnace — readable by furnace group, written by root
+)
+
+type dirSpec struct {
+	path  string
+	owner dirOwner
+	mode  os.FileMode
+}
+
+var managedDirs = []dirSpec{
+	{"/etc/furnace",       ownerRootFurnace, 0750},
+	{"/var/lib/furnace",   ownerFurnace,     0755},
+	{"/srv/apps",          ownerFurnace,     0755},
+	{"/srv/furnace/proxy", ownerFurnace,     0755},
+	{"/srv/furnace/certs", ownerFurnace,     0755},
+}
+
 func newInitCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "init",
@@ -40,36 +62,13 @@ func runInit() error {
 	uid, _ := strconv.Atoi(furnaceUser.Uid)
 	gid, _ := strconv.Atoi(furnaceUser.Gid)
 
-	dirs := []string{
-		"/etc/furnace",
-		"/var/lib/furnace",
-		"/srv/apps",
-		"/srv/furnace/proxy",
-		"/opt/vps/certs",
-	}
-	ownedDirs := map[string]bool{
-		"/var/lib/furnace": true,
-		"/srv/apps":        true,
-	}
-
-	for _, dir := range dirs {
-		created, err := ensureDir(dir)
-		if err != nil {
-			return fmt.Errorf("create %s: %w", dir, err)
-		}
-		if created {
-			fmt.Printf("created  %s\n", dir)
-		} else {
-			fmt.Printf("exists   %s\n", dir)
-		}
-		if ownedDirs[dir] {
-			if err := os.Chown(dir, uid, gid); err != nil {
-				return fmt.Errorf("chown %s: %w", dir, err)
-			}
+	for _, d := range managedDirs {
+		if err := ensureManagedDir(d, uid, gid); err != nil {
+			return err
 		}
 	}
 
-	if err := ensureConfigScaffold(); err != nil {
+	if err := ensureConfigScaffold(gid); err != nil {
 		return fmt.Errorf("config scaffold: %w", err)
 	}
 
@@ -77,6 +76,35 @@ func runInit() error {
 		return fmt.Errorf("docker network: %w", err)
 	}
 
+	return nil
+}
+
+func ensureManagedDir(d dirSpec, uid, gid int) error {
+	created, err := ensureDir(d.path, d.mode)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", d.path, err)
+	}
+	if created {
+		fmt.Printf("created  %s\n", d.path)
+	} else {
+		fmt.Printf("exists   %s\n", d.path)
+	}
+
+	var duid, dgid int
+	switch d.owner {
+	case ownerFurnace:
+		duid, dgid = uid, gid
+	case ownerRootFurnace:
+		duid, dgid = 0, gid
+	default: // ownerRoot
+		duid, dgid = 0, 0
+	}
+	if err := os.Chown(d.path, duid, dgid); err != nil {
+		return fmt.Errorf("chown %s: %w", d.path, err)
+	}
+	if err := os.Chmod(d.path, d.mode); err != nil {
+		return fmt.Errorf("chmod %s: %w", d.path, err)
+	}
 	return nil
 }
 
@@ -100,21 +128,25 @@ func ensureSystemUser() error {
 	return nil
 }
 
-func ensureDir(path string) (created bool, err error) {
+func ensureDir(path string, mode os.FileMode) (created bool, err error) {
 	if _, err := os.Stat(path); err == nil {
 		return false, nil
 	}
-	return true, os.MkdirAll(path, 0755)
+	return true, os.MkdirAll(path, mode)
 }
 
-func ensureConfigScaffold() error {
+func ensureConfigScaffold(gid int) error {
 	const configPath = "/etc/furnace/furnace.yaml"
 	if _, err := os.Stat(configPath); err == nil {
 		fmt.Printf("exists   %s (not overwritten)\n", configPath)
+		_ = os.Chown(configPath, 0, gid)
 		return nil
 	}
 	if err := os.WriteFile(configPath, furnaceconfig.ExampleConfig, 0640); err != nil {
 		return err
+	}
+	if err := os.Chown(configPath, 0, gid); err != nil {
+		return fmt.Errorf("chown config: %w", err)
 	}
 	fmt.Printf("created  %s\n", configPath)
 	return nil

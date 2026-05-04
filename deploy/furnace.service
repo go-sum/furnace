@@ -17,7 +17,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/var/lib/furnace /srv/apps
+ReadWritePaths=/var/lib/furnace /srv/apps /srv/furnace/proxy
 ReadOnlyPaths=/etc/furnace
 
 # Docker socket access via group membership
