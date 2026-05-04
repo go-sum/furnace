@@ -38,8 +38,8 @@ tasks:
       - sh: git describe --tags --abbrev=0 2>/dev/null | grep .
         msg: "No tag found — run git:version, git:minor, or git:major first"
     cmds:
-      - "@git push"
-      - "@git push origin \"$(git describe --tags --abbrev=0)\""
+      - git push
+      - git push origin "$(git describe --tags --abbrev=0)"
 
   _bump:
     internal: true
