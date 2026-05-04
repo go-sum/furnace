@@ -72,6 +72,10 @@ func runInit() error {
 		return fmt.Errorf("config scaffold: %w", err)
 	}
 
+	if err := ensureDockerGroup(); err != nil {
+		return fmt.Errorf("docker group: %w", err)
+	}
+
 	if err := ensureDockerNetwork("caddy_net"); err != nil {
 		return fmt.Errorf("docker network: %w", err)
 	}
@@ -121,11 +125,29 @@ func ensureSystemUser() error {
 	).Run(); err != nil {
 		return fmt.Errorf("useradd: %w", err)
 	}
+	fmt.Println("created  user furnace")
+	return nil
+}
+
+func ensureDockerGroup() error {
 	if err := exec.Command("usermod", "-aG", "docker", "furnace").Run(); err != nil {
 		return fmt.Errorf("usermod: %w", err)
 	}
-	fmt.Println("created  user furnace (docker group)")
+	fmt.Println("added    furnace to docker group")
 	return nil
+}
+
+func ensureDockerNetwork(name string) error {
+	out, err := exec.Command("docker", "network", "create", name).CombinedOutput()
+	if err == nil {
+		fmt.Printf("created  docker network %s\n", name)
+		return nil
+	}
+	if strings.Contains(string(out), "already exists") {
+		fmt.Printf("exists   docker network %s\n", name)
+		return nil
+	}
+	return fmt.Errorf("create docker network %s: %w\n%s", name, err, out)
 }
 
 func ensureDir(path string, mode os.FileMode) (created bool, err error) {
@@ -150,17 +172,4 @@ func ensureConfigScaffold(gid int) error {
 	}
 	fmt.Printf("created  %s\n", configPath)
 	return nil
-}
-
-func ensureDockerNetwork(name string) error {
-	out, err := exec.Command("docker", "network", "create", name).CombinedOutput()
-	if err == nil {
-		fmt.Printf("created  docker network %s\n", name)
-		return nil
-	}
-	if strings.Contains(string(out), "already exists") {
-		fmt.Printf("exists   docker network %s\n", name)
-		return nil
-	}
-	return fmt.Errorf("create network %s: %w\n%s", name, err, out)
 }

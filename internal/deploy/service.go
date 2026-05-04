@@ -50,9 +50,7 @@ func NewService(cfg ServiceConfig) *Service {
 	if rootCtx == nil {
 		rootCtx = context.Background()
 	}
-
 	serviceCtx, cancel := context.WithCancel(rootCtx)
-
 	return &Service{
 		apps:     cfg.Apps,
 		executor: cfg.Executor,
@@ -68,8 +66,7 @@ func NewService(cfg ServiceConfig) *Service {
 }
 
 // ReconcileOnStartup marks any non-terminal deployments as failed. This handles
-// the case where the process crashed mid-deploy, leaving status records stuck
-// in a non-terminal state that would never resolve on their own.
+// the case where the process crashed mid-deploy.
 func (s *Service) ReconcileOnStartup(ctx context.Context) {
 	for appName := range s.apps {
 		d, err := s.store.GetLatest(ctx, appName)
@@ -101,14 +98,9 @@ func (s *Service) Start(ctx context.Context, req model.DeployRequest) (*model.De
 		return nil, model.ErrAppNotFound
 	}
 
-	if !strings.HasPrefix(req.Image, app.AllowedImagePrefix) {
-		s.wg.Done()
-		return nil, fmt.Errorf("%w: %q does not start with %q", model.ErrImageNotAllowed, req.Image, app.AllowedImagePrefix)
-	}
-
 	if strings.ContainsAny(req.Image, "\n\r\t =") {
 		s.wg.Done()
-		return nil, fmt.Errorf("%w: image contains invalid characters", model.ErrImageNotAllowed)
+		return nil, fmt.Errorf("%w: %q", model.ErrImageInvalid, req.Image)
 	}
 
 	release, err := s.lock.Acquire(ctx, req.AppName)
@@ -121,18 +113,14 @@ func (s *Service) Start(ctx context.Context, req model.DeployRequest) (*model.De
 		ID:        ulid.Make().String(),
 		AppName:   req.AppName,
 		Image:     req.Image,
+		Tag:       req.Tag,
+		Digest:    req.Digest,
 		Status:    model.StatusPending,
-		Actor:     req.Actor,
-		Repo:      req.Repo,
-		Ref:       req.Ref,
-		RunID:     req.RunID,
-		RequestID: req.RequestID,
 		StartedAt: time.Now(),
 	}
 
-	prevImage := s.readCurrentImage(app)
-	if prevImage != "" {
-		deployment.PrevImage = prevImage
+	if prev := s.readCurrentImage(app); prev != "" {
+		deployment.PrevImage = prev
 	}
 
 	if err := s.store.Save(ctx, deployment); err != nil {
@@ -146,18 +134,13 @@ func (s *Service) Start(ctx context.Context, req model.DeployRequest) (*model.De
 		AppName:   req.AppName,
 		Action:    "deploy",
 		Status:    "started",
-		Actor:     req.Actor,
 		Image:     req.Image,
-		Metadata: map[string]string{
-			"ref":        req.Ref,
-			"run_id":     req.RunID,
-			"request_id": req.RequestID,
-		},
+		Tag:       req.Tag,
+		Digest:    req.Digest,
 	})
 
 	snapshot := *deployment
 	go s.execute(app, deployment, release)
-
 	return &snapshot, nil
 }
 
@@ -223,16 +206,16 @@ func (s *Service) execute(app model.AppConfig, deployment *model.Deployment, rel
 		AppName:    deployment.AppName,
 		Action:     "deploy",
 		Status:     "completed",
-		Actor:      deployment.Actor,
 		Image:      deployment.Image,
+		Tag:        deployment.Tag,
 		DurationMs: deployment.EndedAt.Sub(deployment.StartedAt).Milliseconds(),
 	})
 
 	s.logger.Info("deployment completed",
 		"app", deployment.AppName,
 		"image", deployment.Image,
+		"tag", deployment.Tag,
 		"duration", deployment.EndedAt.Sub(deployment.StartedAt),
-		"request_id", deployment.RequestID,
 	)
 
 	if pruned, err := s.store.Prune(ctx, deployment.AppName, 20); err != nil {
@@ -248,13 +231,7 @@ func (s *Service) Status(ctx context.Context, appName string) (*model.Deployment
 	if _, ok := s.apps[appName]; !ok {
 		return nil, model.ErrAppNotFound
 	}
-
-	d, err := s.store.GetLatest(ctx, appName)
-	if err != nil {
-		return nil, fmt.Errorf("get latest deployment: %w", err)
-	}
-
-	return d, nil
+	return s.store.GetLatest(ctx, appName)
 }
 
 func (s *Service) Shutdown(ctx context.Context) error {
@@ -286,7 +263,6 @@ func (s *Service) failDeployment(ctx context.Context, d *model.Deployment, step 
 	if envState != nil {
 		rollbackErr = s.restoreEnv(*envState)
 	}
-
 	d.Status = model.StatusFailed
 	d.EndedAt = time.Now()
 	d.Error = formatFailure(step, err, rollbackErr)
@@ -297,8 +273,8 @@ func (s *Service) failDeployment(ctx context.Context, d *model.Deployment, step 
 		AppName:    d.AppName,
 		Action:     "deploy",
 		Status:     "failed",
-		Actor:      d.Actor,
 		Image:      d.Image,
+		Tag:        d.Tag,
 		Error:      d.Error,
 		DurationMs: d.EndedAt.Sub(d.StartedAt).Milliseconds(),
 	})
@@ -308,7 +284,6 @@ func (s *Service) failDeployment(ctx context.Context, d *model.Deployment, step 
 		"step", step,
 		"error", err,
 		"rollback_error", rollbackErr,
-		"request_id", d.RequestID,
 	)
 }
 
@@ -330,7 +305,6 @@ func (s *Service) writeEnv(app model.AppConfig, image string) (envFileState, err
 	if data, err := os.ReadFile(envPath); err == nil {
 		state.Existed = true
 		state.Content = data
-
 		backupPath := filepath.Join(backupDir, fmt.Sprintf("%d.env", time.Now().UnixNano()))
 		if err := os.WriteFile(backupPath, data, 0640); err != nil {
 			return envFileState{}, fmt.Errorf("write env backup: %w", err)
@@ -341,16 +315,13 @@ func (s *Service) writeEnv(app model.AppConfig, image string) (envFileState, err
 
 	content := fmt.Sprintf("%s=%s\n", app.ImageVar, image)
 	tmpPath := envPath + ".tmp"
-
 	if err := os.WriteFile(tmpPath, []byte(content), 0640); err != nil {
 		return envFileState{}, fmt.Errorf("write env tmp: %w", err)
 	}
-
 	if err := os.Rename(tmpPath, envPath); err != nil {
 		os.Remove(tmpPath)
 		return envFileState{}, fmt.Errorf("rename env: %w", err)
 	}
-
 	return state, nil
 }
 
@@ -360,9 +331,7 @@ func (s *Service) pruneEnvBackups(app model.AppConfig, keep int) {
 	if err != nil || len(entries) <= keep {
 		return
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
-	})
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	for _, e := range entries[:len(entries)-keep] {
 		os.Remove(filepath.Join(backupDir, e.Name()))
 	}
@@ -374,7 +343,6 @@ func (s *Service) readCurrentImage(app model.AppConfig) string {
 	if err != nil {
 		return ""
 	}
-
 	prefix := app.ImageVar + "="
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.HasPrefix(line, prefix) {
@@ -408,7 +376,6 @@ func (s *Service) restoreEnv(state envFileState) error {
 		}
 		return nil
 	}
-
 	tmpPath := state.Path + ".restore"
 	if err := os.WriteFile(tmpPath, state.Content, 0640); err != nil {
 		return fmt.Errorf("write env restore tmp: %w", err)
@@ -427,7 +394,6 @@ func formatFailure(step string, err error, rollbackErr error) string {
 	return fmt.Sprintf("%s: %v; restore env: %v", step, err, rollbackErr)
 }
 
-// withOutput appends truncated command output to an error for diagnostics.
 func withOutput(err error, output []byte) error {
 	if len(output) == 0 {
 		return err

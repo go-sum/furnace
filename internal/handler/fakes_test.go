@@ -1,0 +1,16 @@
+package handler
+
+import (
+	"context"
+
+	"github.com/go-sum/furnace/internal/model"
+)
+
+type fakeDeployer struct {
+	deployment *model.Deployment
+	err        error
+}
+
+func (f *fakeDeployer) Status(_ context.Context, _ string) (*model.Deployment, error) {
+	return f.deployment, f.err
+}

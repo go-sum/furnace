@@ -35,7 +35,7 @@ func TestStatusHandler_WithDeployment(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	defer resp.Body.Close()
-	expected := "{\"id\":\"01ABC\",\"app_name\":\"myapp\",\"image\":\"ghcr.io/org/repo:v1.0.0\",\"status\":\"completed\",\"actor\":\"\",\"repo\":\"\",\"ref\":\"\",\"started_at\":\"0001-01-01T00:00:00Z\",\"ended_at\":\"0001-01-01T00:00:00Z\"}\n"
+	expected := "{\"id\":\"01ABC\",\"app_name\":\"myapp\",\"image\":\"ghcr.io/org/repo:v1.0.0\",\"tag\":\"\",\"digest\":\"\",\"status\":\"completed\",\"started_at\":\"0001-01-01T00:00:00Z\",\"ended_at\":\"0001-01-01T00:00:00Z\"}\n"
 	if string(body) != expected {
 		t.Fatalf("status body mismatch:\ngot  %q\nwant %q", string(body), expected)
 	}

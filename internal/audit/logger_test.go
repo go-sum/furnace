@@ -25,8 +25,8 @@ func TestFileLogger_SingleEntry(t *testing.T) {
 		AppName:   "myapp",
 		Action:    "deploy",
 		Status:    "completed",
-		Actor:     "bot",
 		Image:     "ghcr.io/org/repo:v1.0.0",
+		Tag:       "v1.0.0",
 	}
 
 	err = logger.Log(context.Background(), entry)

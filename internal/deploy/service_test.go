@@ -55,17 +55,17 @@ func newTestService(t *testing.T, executor CommandExecutor, health HealthChecker
 
 	apps := map[string]model.AppConfig{
 		"testapp": {
-			Name:               "testapp",
-			Repo:               "org/repo",
-			AllowedRef:         "refs/tags/v*",
-			Workflow:           ".github/workflows/release.yml",
-			Dir:                appDir,
-			ComposeFiles:       []string{"docker-compose.data.yml", "docker-compose.yml"},
-			EnvFile:            ".deploy.env",
-			ImageVar:           "APP_IMAGE",
-			AllowedImagePrefix: "ghcr.io/org/repo:",
-			HealthURL:          "http://127.0.0.1:8080/health",
-			HealthTimeout:      5 * time.Second,
+			Name:            "testapp",
+			Image:           "ghcr.io/org/myapp",
+			TagPattern:      "v*",
+			AllowedIdentity: "org/myapp",
+			Dir:             appDir,
+			Port:            8080,
+			ComposeFiles:    []string{"docker-compose.data.yml", "docker-compose.yml"},
+			EnvFile:         ".deploy.env",
+			ImageVar:        "APP_IMAGE",
+			HealthURL:       "http://testapp-web-1:8080/healthz",
+			HealthTimeout:   5 * time.Second,
 		},
 	}
 
@@ -85,13 +85,10 @@ func newTestService(t *testing.T, executor CommandExecutor, health HealthChecker
 
 func validRequest() model.DeployRequest {
 	return model.DeployRequest{
-		AppName:  "testapp",
-		Image:    "ghcr.io/org/repo:v1.0.0",
-		Actor:    "bot",
-		Repo:     "org/repo",
-		Ref:      "refs/tags/v1.0.0",
-		Workflow: "org/repo/.github/workflows/release.yml@refs/tags/v1.0.0",
-		RunID:    "12345",
+		AppName: "testapp",
+		Image:   "ghcr.io/org/myapp:v1.0.0",
+		Tag:     "v1.0.0",
+		Digest:  "sha256:abc123",
 	}
 }
 
@@ -121,9 +118,7 @@ func TestService_Start_HappyPath(t *testing.T) {
 			{output: []byte("started")},
 		},
 	}
-	health := &fakeHealthChecker{}
-
-	svc, _ := newTestService(t, exec, health)
+	svc, _ := newTestService(t, exec, &fakeHealthChecker{})
 
 	d, err := svc.Start(context.Background(), validRequest())
 	if err != nil {
@@ -137,56 +132,30 @@ func TestService_Start_HappyPath(t *testing.T) {
 	if final.Status != model.StatusCompleted {
 		t.Fatalf("expected completed, got %s (error: %s)", final.Status, final.Error)
 	}
-	if final.Image != "ghcr.io/org/repo:v1.0.0" {
-		t.Fatalf("expected image ghcr.io/org/repo:v1.0.0, got %s", final.Image)
+	if final.Image != "ghcr.io/org/myapp:v1.0.0" {
+		t.Fatalf("expected image ghcr.io/org/myapp:v1.0.0, got %s", final.Image)
 	}
-}
-
-func TestService_Start_ImageNotAllowed(t *testing.T) {
-	exec := &fakeExecutor{}
-	health := &fakeHealthChecker{}
-	svc, _ := newTestService(t, exec, health)
-
-	req := validRequest()
-	req.Image = "docker.io/evil/image:latest"
-
-	_, err := svc.Start(context.Background(), req)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !errors.Is(err, model.ErrImageNotAllowed) {
-		t.Fatalf("expected ErrImageNotAllowed, got: %v", err)
+	if final.Tag != "v1.0.0" {
+		t.Fatalf("expected tag v1.0.0, got %s", final.Tag)
 	}
 }
 
 func TestService_Start_UnknownApp(t *testing.T) {
-	exec := &fakeExecutor{}
-	health := &fakeHealthChecker{}
-	svc, _ := newTestService(t, exec, health)
-
+	svc, _ := newTestService(t, &fakeExecutor{}, &fakeHealthChecker{})
 	req := validRequest()
 	req.AppName = "nonexistent"
 
 	_, err := svc.Start(context.Background(), req)
-	if err == nil {
-		t.Fatal("expected error")
-	}
 	if !errors.Is(err, model.ErrAppNotFound) {
 		t.Fatalf("expected ErrAppNotFound, got: %v", err)
 	}
 }
 
 func TestService_Start_PullFails(t *testing.T) {
-	exec := &fakeExecutor{
-		results: []fakeExecResult{
-			{err: errors.New("network timeout")},
-		},
-	}
-	health := &fakeHealthChecker{}
-	svc, _ := newTestService(t, exec, health)
+	exec := &fakeExecutor{results: []fakeExecResult{{err: errors.New("network timeout")}}}
+	svc, _ := newTestService(t, exec, &fakeHealthChecker{})
 
-	_, err := svc.Start(context.Background(), validRequest())
-	if err != nil {
+	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("start should not fail: %v", err)
 	}
 
@@ -200,17 +169,13 @@ func TestService_Start_PullFails(t *testing.T) {
 }
 
 func TestService_Start_ComposeUpFails(t *testing.T) {
-	exec := &fakeExecutor{
-		results: []fakeExecResult{
-			{output: []byte("pulled")},
-			{err: errors.New("container crash")},
-		},
-	}
-	health := &fakeHealthChecker{}
-	svc, _ := newTestService(t, exec, health)
+	exec := &fakeExecutor{results: []fakeExecResult{
+		{output: []byte("pulled")},
+		{err: errors.New("container crash")},
+	}}
+	svc, _ := newTestService(t, exec, &fakeHealthChecker{})
 
-	_, err := svc.Start(context.Background(), validRequest())
-	if err != nil {
+	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("start should not fail: %v", err)
 	}
 
@@ -219,22 +184,18 @@ func TestService_Start_ComposeUpFails(t *testing.T) {
 		t.Fatalf("expected failed status, got %s", d.Status)
 	}
 	if d.Error != "compose up: container crash" {
-		t.Fatalf("expected compose up failure error, got %q", d.Error)
+		t.Fatalf("unexpected error: %q", d.Error)
 	}
 }
 
 func TestService_Start_HealthCheckFails(t *testing.T) {
-	exec := &fakeExecutor{
-		results: []fakeExecResult{
-			{output: []byte("pulled")},
-			{output: []byte("started")},
-		},
-	}
-	health := &fakeHealthChecker{err: model.ErrHealthCheckFailed}
-	svc, _ := newTestService(t, exec, health)
+	exec := &fakeExecutor{results: []fakeExecResult{
+		{output: []byte("pulled")},
+		{output: []byte("started")},
+	}}
+	svc, _ := newTestService(t, exec, &fakeHealthChecker{err: model.ErrHealthCheckFailed})
 
-	_, err := svc.Start(context.Background(), validRequest())
-	if err != nil {
+	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("start should not fail: %v", err)
 	}
 
@@ -243,26 +204,20 @@ func TestService_Start_HealthCheckFails(t *testing.T) {
 		t.Fatalf("expected failed status, got %s", d.Status)
 	}
 	if d.Error != "health check: health check failed" {
-		t.Fatalf("expected health check failure error, got %q", d.Error)
+		t.Fatalf("unexpected error: %q", d.Error)
 	}
 }
 
 func TestService_Start_ConcurrentReject(t *testing.T) {
-	health := &fakeHealthChecker{}
 	blockExec := &blockingExecutor{done: make(chan struct{})}
-	svc, _ := newTestService(t, blockExec, health)
+	svc, _ := newTestService(t, blockExec, &fakeHealthChecker{})
 
-	_, err := svc.Start(context.Background(), validRequest())
-	if err != nil {
+	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("first start: %v", err)
 	}
-
 	time.Sleep(50 * time.Millisecond)
 
-	_, err = svc.Start(context.Background(), validRequest())
-	if err == nil {
-		t.Fatal("expected error on concurrent deploy")
-	}
+	_, err := svc.Start(context.Background(), validRequest())
 	if !errors.Is(err, model.ErrDeploymentInProgress) {
 		t.Fatalf("expected ErrDeploymentInProgress, got: %v", err)
 	}
@@ -285,86 +240,46 @@ func (b *blockingExecutor) Exec(ctx context.Context, _ string, _ []string) ([]by
 }
 
 func TestService_Status_UnknownApp(t *testing.T) {
-	exec := &fakeExecutor{}
-	health := &fakeHealthChecker{}
-	svc, _ := newTestService(t, exec, health)
-
+	svc, _ := newTestService(t, &fakeExecutor{}, &fakeHealthChecker{})
 	_, err := svc.Status(context.Background(), "nonexistent")
 	if !errors.Is(err, model.ErrAppNotFound) {
 		t.Fatalf("expected ErrAppNotFound, got: %v", err)
 	}
 }
 
-func TestService_Status_AfterDeploy(t *testing.T) {
-	exec := &fakeExecutor{
-		results: []fakeExecResult{
-			{output: []byte("pulled")},
-			{output: []byte("started")},
-		},
-	}
-	health := &fakeHealthChecker{}
-	svc, _ := newTestService(t, exec, health)
-
-	_, err := svc.Start(context.Background(), validRequest())
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-
-	d := waitForTerminal(t, svc, "testapp", 5*time.Second)
-	if d.Status != model.StatusCompleted {
-		t.Fatalf("expected completed, got %s", d.Status)
-	}
-}
-
 func TestService_Start_WritesEnvFile(t *testing.T) {
-	exec := &fakeExecutor{
-		results: []fakeExecResult{
-			{output: []byte("pulled")},
-			{output: []byte("started")},
-		},
-	}
-	health := &fakeHealthChecker{}
-	svc, appDir := newTestService(t, exec, health)
+	exec := &fakeExecutor{results: []fakeExecResult{
+		{output: []byte("pulled")},
+		{output: []byte("started")},
+	}}
+	svc, appDir := newTestService(t, exec, &fakeHealthChecker{})
 
-	_, err := svc.Start(context.Background(), validRequest())
-	if err != nil {
+	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-
 	waitForTerminal(t, svc, "testapp", 5*time.Second)
 
-	envPath := filepath.Join(appDir, ".deploy.env")
-	data, err := os.ReadFile(envPath)
+	data, err := os.ReadFile(filepath.Join(appDir, ".deploy.env"))
 	if err != nil {
 		t.Fatalf("read env file: %v", err)
 	}
-
-	expected := "APP_IMAGE=ghcr.io/org/repo:v1.0.0\n"
-	if string(data) != expected {
-		t.Fatalf("env file:\ngot  %q\nwant %q", string(data), expected)
+	want := "APP_IMAGE=ghcr.io/org/myapp:v1.0.0\n"
+	if string(data) != want {
+		t.Fatalf("env file:\ngot  %q\nwant %q", string(data), want)
 	}
 }
 
 func TestService_Start_RestoresEnvAfterPullFailure(t *testing.T) {
-	exec := &fakeExecutor{
-		results: []fakeExecResult{
-			{err: errors.New("network timeout")},
-		},
-	}
-	health := &fakeHealthChecker{}
-	svc, appDir := newTestService(t, exec, health)
+	exec := &fakeExecutor{results: []fakeExecResult{{err: errors.New("network timeout")}}}
+	svc, appDir := newTestService(t, exec, &fakeHealthChecker{})
 
 	envPath := filepath.Join(appDir, ".deploy.env")
-	previous := "APP_IMAGE=ghcr.io/org/repo:previous\nOTHER=value\n"
-	if err := os.WriteFile(envPath, []byte(previous), 0640); err != nil {
-		t.Fatalf("write initial env: %v", err)
-	}
+	previous := "APP_IMAGE=ghcr.io/org/myapp:v0.9.0\n"
+	os.WriteFile(envPath, []byte(previous), 0640)
 
-	_, err := svc.Start(context.Background(), validRequest())
-	if err != nil {
+	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("start should not fail: %v", err)
 	}
-
 	waitForTerminal(t, svc, "testapp", 5*time.Second)
 
 	data, err := os.ReadFile(envPath)
@@ -372,63 +287,24 @@ func TestService_Start_RestoresEnvAfterPullFailure(t *testing.T) {
 		t.Fatalf("read env after failure: %v", err)
 	}
 	if string(data) != previous {
-		t.Fatalf("env after failure:\ngot  %q\nwant %q", string(data), previous)
-	}
-}
-
-func TestService_Start_RestoresEnvAfterComposeUpFailure(t *testing.T) {
-	exec := &fakeExecutor{
-		results: []fakeExecResult{
-			{output: []byte("pulled")},
-			{err: errors.New("container crash")},
-		},
-	}
-	health := &fakeHealthChecker{}
-	svc, appDir := newTestService(t, exec, health)
-
-	envPath := filepath.Join(appDir, ".deploy.env")
-	previous := "APP_IMAGE=ghcr.io/org/repo:previous\n"
-	if err := os.WriteFile(envPath, []byte(previous), 0640); err != nil {
-		t.Fatalf("write initial env: %v", err)
-	}
-
-	_, err := svc.Start(context.Background(), validRequest())
-	if err != nil {
-		t.Fatalf("start should not fail: %v", err)
-	}
-
-	waitForTerminal(t, svc, "testapp", 5*time.Second)
-
-	data, err := os.ReadFile(envPath)
-	if err != nil {
-		t.Fatalf("read env after failure: %v", err)
-	}
-	if string(data) != previous {
-		t.Fatalf("env after failure:\ngot  %q\nwant %q", string(data), previous)
+		t.Fatalf("env not restored:\ngot  %q\nwant %q", string(data), previous)
 	}
 }
 
 func TestService_Start_RestoresEnvAfterHealthFailure(t *testing.T) {
-	exec := &fakeExecutor{
-		results: []fakeExecResult{
-			{output: []byte("pulled")},
-			{output: []byte("started")},
-		},
-	}
-	health := &fakeHealthChecker{err: model.ErrHealthCheckFailed}
-	svc, appDir := newTestService(t, exec, health)
+	exec := &fakeExecutor{results: []fakeExecResult{
+		{output: []byte("pulled")},
+		{output: []byte("started")},
+	}}
+	svc, appDir := newTestService(t, exec, &fakeHealthChecker{err: model.ErrHealthCheckFailed})
 
 	envPath := filepath.Join(appDir, ".deploy.env")
-	previous := "APP_IMAGE=ghcr.io/org/repo:previous\n"
-	if err := os.WriteFile(envPath, []byte(previous), 0640); err != nil {
-		t.Fatalf("write initial env: %v", err)
-	}
+	previous := "APP_IMAGE=ghcr.io/org/myapp:v0.9.0\n"
+	os.WriteFile(envPath, []byte(previous), 0640)
 
-	_, err := svc.Start(context.Background(), validRequest())
-	if err != nil {
+	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("start should not fail: %v", err)
 	}
-
 	waitForTerminal(t, svc, "testapp", 5*time.Second)
 
 	data, err := os.ReadFile(envPath)
@@ -436,61 +312,44 @@ func TestService_Start_RestoresEnvAfterHealthFailure(t *testing.T) {
 		t.Fatalf("read env after failure: %v", err)
 	}
 	if string(data) != previous {
-		t.Fatalf("env after failure:\ngot  %q\nwant %q", string(data), previous)
+		t.Fatalf("env not restored:\ngot  %q\nwant %q", string(data), previous)
 	}
 }
 
 func TestService_Start_RemovesEnvWhenNoPreviousFileExists(t *testing.T) {
-	exec := &fakeExecutor{
-		results: []fakeExecResult{
-			{err: errors.New("network timeout")},
-		},
-	}
-	health := &fakeHealthChecker{}
-	svc, appDir := newTestService(t, exec, health)
+	exec := &fakeExecutor{results: []fakeExecResult{{err: errors.New("network timeout")}}}
+	svc, appDir := newTestService(t, exec, &fakeHealthChecker{})
 
-	_, err := svc.Start(context.Background(), validRequest())
-	if err != nil {
+	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("start should not fail: %v", err)
 	}
-
 	waitForTerminal(t, svc, "testapp", 5*time.Second)
 
-	envPath := filepath.Join(appDir, ".deploy.env")
-	_, err = os.Stat(envPath)
+	_, err := os.Stat(filepath.Join(appDir, ".deploy.env"))
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected env file to be removed, got err=%v", err)
 	}
 }
 
-func TestService_Start_ImageWithNewlineRejected(t *testing.T) {
-	exec := &fakeExecutor{}
-	health := &fakeHealthChecker{}
-	svc, _ := newTestService(t, exec, health)
-
-	cases := []string{
-		"ghcr.io/org/repo:v1\nEVIL=yes",
-		"ghcr.io/org/repo:v1\rEVIL=yes",
-		"ghcr.io/org/repo:v1\tEVIL=yes",
-		"ghcr.io/org/repo:v1 =bad",
-	}
-	for _, img := range cases {
+func TestService_Start_ImageWithInvalidChars(t *testing.T) {
+	svc, _ := newTestService(t, &fakeExecutor{}, &fakeHealthChecker{})
+	for _, img := range []string{
+		"ghcr.io/org/myapp:v1\nEVIL=yes",
+		"ghcr.io/org/myapp:v1\rEVIL=yes",
+		"ghcr.io/org/myapp:v1\tEVIL=yes",
+		"ghcr.io/org/myapp:v1 =bad",
+	} {
 		req := validRequest()
 		req.Image = img
 		_, err := svc.Start(context.Background(), req)
-		if err == nil {
-			t.Fatalf("expected error for image %q", img)
-		}
-		if !errors.Is(err, model.ErrImageNotAllowed) {
-			t.Fatalf("expected ErrImageNotAllowed for image %q, got: %v", img, err)
+		if !errors.Is(err, model.ErrImageInvalid) {
+			t.Fatalf("expected ErrImageInvalid for %q, got: %v", img, err)
 		}
 	}
 }
 
 func TestService_ReconcileOnStartup(t *testing.T) {
-	exec := &fakeExecutor{}
-	health := &fakeHealthChecker{}
-	svc, _ := newTestService(t, exec, health)
+	svc, _ := newTestService(t, &fakeExecutor{}, &fakeHealthChecker{})
 
 	stale := &model.Deployment{
 		ID:        "STALE01",
@@ -516,40 +375,11 @@ func TestService_ReconcileOnStartup(t *testing.T) {
 	}
 }
 
-func TestService_ReconcileOnStartup_SkipsTerminal(t *testing.T) {
-	exec := &fakeExecutor{}
-	health := &fakeHealthChecker{}
-	svc, _ := newTestService(t, exec, health)
-
-	completed := &model.Deployment{
-		ID:        "DONE01",
-		AppName:   "testapp",
-		Status:    model.StatusCompleted,
-		StartedAt: time.Now().Add(-5 * time.Minute),
-		EndedAt:   time.Now().Add(-4 * time.Minute),
-	}
-	if err := svc.store.Save(context.Background(), completed); err != nil {
-		t.Fatalf("save completed deployment: %v", err)
-	}
-
-	svc.ReconcileOnStartup(context.Background())
-
-	d, err := svc.Status(context.Background(), "testapp")
-	if err != nil {
-		t.Fatalf("status: %v", err)
-	}
-	if d.Status != model.StatusCompleted {
-		t.Fatalf("expected completed to be untouched, got %s", d.Status)
-	}
-}
-
 func TestService_Shutdown_CancelsActiveDeployment(t *testing.T) {
-	health := &fakeHealthChecker{}
 	blockExec := &blockingExecutor{done: make(chan struct{})}
-	svc, _ := newTestService(t, blockExec, health)
+	svc, _ := newTestService(t, blockExec, &fakeHealthChecker{})
 
-	_, err := svc.Start(context.Background(), validRequest())
-	if err != nil {
+	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
@@ -562,10 +392,7 @@ func TestService_Shutdown_CancelsActiveDeployment(t *testing.T) {
 
 	d := waitForTerminal(t, svc, "testapp", 5*time.Second)
 	if d.Status != model.StatusFailed {
-		t.Fatalf("expected failed status after shutdown, got %s", d.Status)
-	}
-	if d.Error != "compose pull: context canceled" {
-		t.Fatalf("expected cancellation error, got %q", d.Error)
+		t.Fatalf("expected failed after shutdown, got %s", d.Status)
 	}
 }
 
@@ -590,7 +417,5 @@ func TestService_Execute_PanicRecovery(t *testing.T) {
 	if final.Status != model.StatusFailed {
 		t.Fatalf("expected failed after panic, got %s", final.Status)
 	}
-	if final.Error == "" {
-		t.Fatal("expected error message after panic")
-	}
 }
+

@@ -44,15 +44,34 @@ func TestDockerExecutor_RejectsVariousBinaries(t *testing.T) {
 	}
 }
 
+func TestDockerExecutor_RejectsNonComposeSubcommand(t *testing.T) {
+	exec := NewDockerExecutor()
+	cases := [][]string{
+		{"docker", "run", "alpine"},
+		{"docker", "exec", "container"},
+		{"docker", "pull", "alpine"},
+		{"docker"},
+	}
+	for _, args := range cases {
+		_, err := exec.Exec(context.Background(), t.TempDir(), args)
+		if err == nil {
+			t.Fatalf("expected error for args %v", args)
+		}
+		if err.Error() != "only docker compose subcommand is allowed" {
+			t.Fatalf("unexpected error for args %v: %v", args, err)
+		}
+	}
+}
+
 func TestDockerExecutor_ExecutesDockerCommand(t *testing.T) {
 	exec := NewDockerExecutor()
 
-	out, err := exec.Exec(context.Background(), t.TempDir(), []string{"docker", "version", "--format", "{{.Client.Version}}"})
+	out, err := exec.Exec(context.Background(), t.TempDir(), []string{"docker", "compose", "version"})
 	if err != nil {
 		t.Skipf("docker not available: %v", err)
 	}
 	if len(out) == 0 {
-		t.Fatal("expected output from docker version")
+		t.Fatal("expected output from docker compose version")
 	}
 }
 
@@ -63,7 +82,7 @@ func TestDockerExecutor_RespectsContext(t *testing.T) {
 	defer cancel()
 	time.Sleep(5 * time.Millisecond)
 
-	_, err := exec.Exec(ctx, t.TempDir(), []string{"docker", "version"})
+	_, err := exec.Exec(ctx, t.TempDir(), []string{"docker", "compose", "version"})
 	if err == nil {
 		t.Skip("command completed before timeout")
 	}

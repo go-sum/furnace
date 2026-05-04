@@ -3,7 +3,6 @@ package app
 import (
 	"cmp"
 	"fmt"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -11,50 +10,31 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-sum/furnace/internal/auth"
 	"github.com/go-sum/furnace/internal/model"
 	"gopkg.in/yaml.v3"
 )
 
-var (
-	validAppName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
-	validEnvVar  = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
-)
+var validAppName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+var validDomain = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$`)
 
 type Config struct {
-	Listen     string            `yaml:"listen"`
-	DataDir    string            `yaml:"data_dir"`
-	GitHub     GitHubConfig      `yaml:"github"`
-	Management ManagementConfig  `yaml:"management"`
-	Apps       map[string]AppRaw `yaml:"apps"`
-}
-
-type GitHubConfig struct {
-	Issuer   string `yaml:"issuer"`
-	Audience string `yaml:"audience"`
-}
-
-type ManagementConfig struct {
-	Repo       string `yaml:"repo"`
-	Workflow   string `yaml:"workflow"`
-	AllowedRef string `yaml:"allowed_ref"`
+	DataDir      string            `yaml:"data_dir"`
+	PollInterval time.Duration     `yaml:"poll_interval"`
+	Apps         map[string]AppRaw `yaml:"apps"`
 }
 
 type AppRaw struct {
-	Repo               string              `yaml:"repo"`
-	AllowedRef         string              `yaml:"allowed_ref"`
-	Workflow           string              `yaml:"workflow"`
-	Dir                string              `yaml:"dir"`
-	Domain             string              `yaml:"domain"`
-	Port               int                 `yaml:"port"`
-	ComposeFiles       []string            `yaml:"compose_files"`
-	EnvFile            string              `yaml:"env_file"`
-	ImageVar           string              `yaml:"image_var"`
-	AllowedImagePrefix string              `yaml:"allowed_image_prefix"`
-	HealthURL          string              `yaml:"health_url"`
-	HealthTimeout      time.Duration       `yaml:"health_timeout"`
-	Backup             model.CommandConfig `yaml:"backup"`
-	Migrate            model.CommandConfig `yaml:"migrate"`
+	Image           string        `yaml:"image"`
+	TagPattern      string        `yaml:"tag_pattern"`
+	AllowedIdentity string        `yaml:"allowed_identity"`
+	Dir             string        `yaml:"dir"`
+	Domain          string        `yaml:"domain"`
+	Port            int           `yaml:"port"`
+	ComposeFiles    []string      `yaml:"compose_files"`
+	EnvFile         string        `yaml:"env_file"`
+	ImageVar        string        `yaml:"image_var"`
+	HealthURL       string        `yaml:"health_url"`
+	HealthTimeout   time.Duration `yaml:"health_timeout"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -68,25 +48,8 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	cfg.Listen = cmp.Or(cfg.Listen, "127.0.0.1:8080")
 	cfg.DataDir = cmp.Or(cfg.DataDir, "/var/lib/furnace")
-
-	if !isLoopbackAddr(cfg.Listen) {
-		return nil, fmt.Errorf("listen address %q is not a loopback address; furnace must be behind a reverse proxy for TLS", cfg.Listen)
-	}
-
-	if cfg.GitHub.Issuer == "" {
-		return nil, fmt.Errorf("github.issuer is required")
-	}
-	if cfg.GitHub.Audience == "" {
-		return nil, fmt.Errorf("github.audience is required")
-	}
-
-	if cfg.Management.Repo != "" {
-		if err := validateManagement(cfg.Management); err != nil {
-			return nil, fmt.Errorf("management: %w", err)
-		}
-	}
+	cfg.PollInterval = cmp.Or(cfg.PollInterval, 60*time.Second)
 
 	for name := range cfg.Apps {
 		if !validAppName.MatchString(name) {
@@ -109,56 +72,47 @@ func (c *Config) AppConfig(name string) (model.AppConfig, bool) {
 	}
 
 	return model.AppConfig{
-		Name:               name,
-		Repo:               raw.Repo,
-		AllowedRef:         raw.AllowedRef,
-		Workflow:           raw.Workflow,
-		Dir:                raw.Dir,
-		Domain:             raw.Domain,
-		Port:               raw.Port,
-		ComposeFiles:       raw.ComposeFiles,
-		EnvFile:            raw.EnvFile,
-		ImageVar:           raw.ImageVar,
-		AllowedImagePrefix: raw.AllowedImagePrefix,
-		HealthURL:          raw.HealthURL,
-		HealthTimeout:      cmp.Or(raw.HealthTimeout, 30*time.Second),
-		Backup:             raw.Backup,
-		Migrate:            raw.Migrate,
+		Name:            name,
+		Image:           raw.Image,
+		TagPattern:      raw.TagPattern,
+		AllowedIdentity: raw.AllowedIdentity,
+		Dir:             raw.Dir,
+		Domain:          raw.Domain,
+		Port:            raw.Port,
+		ComposeFiles:    raw.ComposeFiles,
+		EnvFile:         raw.EnvFile,
+		ImageVar:        raw.ImageVar,
+		HealthURL:       raw.HealthURL,
+		HealthTimeout:   cmp.Or(raw.HealthTimeout, 30*time.Second),
 	}, true
 }
 
-func isLoopbackAddr(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return false
+func (c *Config) AllAppConfigs() map[string]model.AppConfig {
+	out := make(map[string]model.AppConfig, len(c.Apps))
+	for name := range c.Apps {
+		cfg, _ := c.AppConfig(name)
+		out[name] = cfg
 	}
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return out
 }
 
 func (c *Config) validateApp(name string) (AppRaw, error) {
 	raw := c.Apps[name]
 
-	if raw.Repo == "" {
-		return AppRaw{}, fmt.Errorf("repo is required")
+	if raw.Image == "" {
+		return AppRaw{}, fmt.Errorf("image is required")
 	}
-	if raw.AllowedRef == "" {
-		return AppRaw{}, fmt.Errorf("allowed_ref is required")
+	if raw.TagPattern == "" {
+		return AppRaw{}, fmt.Errorf("tag_pattern is required")
 	}
-	if err := auth.ValidateRefPattern(raw.AllowedRef); err != nil {
-		return AppRaw{}, err
+	if raw.AllowedIdentity == "" {
+		return AppRaw{}, fmt.Errorf("allowed_identity is required")
 	}
-	if raw.Workflow == "" {
-		return AppRaw{}, fmt.Errorf("workflow is required")
-	}
-	if !strings.HasPrefix(raw.Workflow, ".github/workflows/") {
-		return AppRaw{}, fmt.Errorf("workflow must be a .github/workflows path")
+	if !strings.Contains(raw.AllowedIdentity, "/") {
+		return AppRaw{}, fmt.Errorf("allowed_identity must be in org/repo format")
 	}
 	if raw.Dir == "" {
-		return AppRaw{}, fmt.Errorf("dir is required")
+		raw.Dir = "/srv/apps/" + name
 	}
 	if !filepath.IsAbs(raw.Dir) {
 		return AppRaw{}, fmt.Errorf("dir must be an absolute path")
@@ -166,12 +120,22 @@ func (c *Config) validateApp(name string) (AppRaw, error) {
 	if raw.Domain == "" {
 		return AppRaw{}, fmt.Errorf("domain is required")
 	}
-	raw.Port = cmp.Or(raw.Port, 8080)
-	if raw.AllowedImagePrefix == "" {
-		return AppRaw{}, fmt.Errorf("allowed_image_prefix is required")
+	if !validDomain.MatchString(raw.Domain) {
+		return AppRaw{}, fmt.Errorf("domain must be a valid lowercase hostname (e.g. app.example.com)")
 	}
+	raw.Port = cmp.Or(raw.Port, 8080)
 	if raw.HealthURL == "" {
 		return AppRaw{}, fmt.Errorf("health_url is required")
+	}
+	parsedURL, err := url.Parse(raw.HealthURL)
+	if err != nil {
+		return AppRaw{}, fmt.Errorf("health_url is invalid: %w", err)
+	}
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return AppRaw{}, fmt.Errorf("health_url must use http or https")
+	}
+	if parsedURL.Host == "" {
+		return AppRaw{}, fmt.Errorf("health_url must include a host")
 	}
 	if len(raw.ComposeFiles) == 0 {
 		raw.ComposeFiles = []string{"docker-compose.data.yml", "docker-compose.yml"}
@@ -187,40 +151,10 @@ func (c *Config) validateApp(name string) (AppRaw, error) {
 	if err != nil {
 		return AppRaw{}, fmt.Errorf("env_file: %w", err)
 	}
-	imageVar := cmp.Or(raw.ImageVar, "APP_IMAGE")
-	if !validEnvVar.MatchString(imageVar) {
-		return AppRaw{}, fmt.Errorf("image_var %q: must be a valid environment variable name (uppercase letters, digits, underscores)", imageVar)
-	}
-	raw.ImageVar = imageVar
-	parsedURL, err := url.Parse(raw.HealthURL)
-	if err != nil {
-		return AppRaw{}, fmt.Errorf("health_url is invalid: %w", err)
-	}
-	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return AppRaw{}, fmt.Errorf("health_url must use http or https")
-	}
-	if parsedURL.Host == "" {
-		return AppRaw{}, fmt.Errorf("health_url must include a host")
-	}
-
 	raw.EnvFile = envFile
-	return raw, nil
-}
+	raw.ImageVar = cmp.Or(raw.ImageVar, "APP_IMAGE")
 
-func validateManagement(m ManagementConfig) error {
-	if m.Workflow == "" {
-		return fmt.Errorf("workflow is required")
-	}
-	if !strings.HasPrefix(m.Workflow, ".github/workflows/") {
-		return fmt.Errorf("workflow must be a .github/workflows path")
-	}
-	if m.AllowedRef == "" {
-		return fmt.Errorf("allowed_ref is required")
-	}
-	if err := auth.ValidateRefPattern(m.AllowedRef); err != nil {
-		return err
-	}
-	return nil
+	return raw, nil
 }
 
 func normalizeRelativePath(value string) (string, error) {
@@ -230,14 +164,9 @@ func normalizeRelativePath(value string) (string, error) {
 	if filepath.IsAbs(value) {
 		return "", fmt.Errorf("path must be relative")
 	}
-
 	clean := filepath.Clean(value)
-	if clean == "." || clean == "" {
-		return "", fmt.Errorf("path must not be empty")
-	}
-	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path must not escape the app directory")
 	}
-
 	return clean, nil
 }

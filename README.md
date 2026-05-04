@@ -1,34 +1,88 @@
 # Furnace
 
-A secure deployment agent for VPS servers. Furnace receives deployment requests from GitHub Actions via OIDC-authenticated API calls, then orchestrates Docker Compose to pull and start containers.
+A pull-based deployment agent for VPS servers. You SSH in once to bootstrap it, then never again — the worker polls your container registry, verifies signatures with Sigstore, and deploys apps automatically.
 
-Authentication is cryptographic — every request carries a short-lived GitHub Actions OIDC token. Only workflows from the correct repository, branch/tag, and workflow file are accepted. No SSH keys, no shared secrets, no long-lived credentials.
+**The problem:** deploying to a VPS typically requires push-based webhooks, SSH keys, or CI runners with persistent inbound access. These are hard to scope, easy to leak, and add operational overhead.
+
+**Furnace's approach:** the worker polls GHCR for new image tags. When it finds one, it verifies the image's Sigstore signature (checking the GitHub Actions OIDC identity of the signing workflow) and runs `docker compose up`. No inbound webhooks, no shared secrets, no long-lived credentials.
+
+## Contents
+
+- [Architecture](#architecture)
+- [How It Works](#how-it-works)
+- [App Convention](#app-convention)
+- [Installation](#installation)
+- [Adding an App](#adding-an-app)
+- [The Deploy Hint Endpoint](#the-deploy-hint-endpoint)
+- [Monitoring](#monitoring)
+- [Configuration Reference](#configuration-reference)
+- [Data Layout](#data-layout)
+- [Security Model](#security-model)
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│ VPS (Docker host)                                   │
+│                                                     │
+│  caddy_net (Docker bridge network)                  │
+│  ├── caddy (:80, :443)                              │
+│  │     reverse_proxy furnace-web-1:8080             │
+│  │     reverse_proxy myapp-web-1:8080               │
+│  ├── furnace-web-1   (furnace web container)        │
+│  └── myapp-web-1     (app web container)            │
+│                                                     │
+│  furnace worker (systemd host binary)               │
+│    polls GHCR → verifies Sigstore → compose up      │
+└─────────────────────────────────────────────────────┘
+```
+
+- **All containers** (Caddy, furnace-web, apps) share `caddy_net`, a Docker bridge network created by `furnace init`.
+- **Caddy** routes each domain to `{app}-web-1:{port}` using Docker container DNS — no host-port publishing needed.
+- **Worker** runs as a host binary under systemd. It uses the system Docker daemon to run `docker compose` commands.
 
 ## How It Works
 
+### Poll cycle (every `poll_interval`)
+
+```
+worker
+  │
+  ├─ for each app in furnace.yaml:
+  │    1. List tags from GHCR matching tag_pattern
+  │    2. Find the newest semver tag not yet deployed
+  │    3. Verify Sigstore signature — check GitHub Actions OIDC identity
+  │       matches allowed_identity (org/repo)
+  │    4. Write APP_IMAGE=ghcr.io/org/app:vX.Y.Z to .deploy.env
+  │    5. docker compose ... up -d --remove-orphans
+  │    6. Poll health_url until 2xx or timeout
+  │    7. On failure: restore .deploy.env
+  │
+  └─ sleep poll_interval, repeat
+```
+
+Compose files (`docker-compose.yml`, etc.) are operator-provisioned in each app directory and stay on disk between deploys. Only the image reference changes — written to `.deploy.env` before each `compose up`.
+
+The `/v1/apps/{app}/deploy` hint endpoint lets an app's release workflow signal the worker to check immediately, reducing typical deploy latency from `poll_interval` to seconds. It requires no credentials — it is a hint, not a trigger.
+
+### App release workflow
+
 ```
 GitHub Actions (on release)
-    │
-    │  Authorization: Bearer <oidc-token>
-    │  POST /v1/apps/{app}/deploy  {"image": "ghcr.io/org/app:v1.2.0"}
-    ▼
-Furnace (loopback listener, behind reverse proxy)
-    │
-    │  1. Verify JWT signature against GitHub OIDC discovery endpoint
-    │  2. Check token claims: repo, ref glob, workflow file identity
-    │  3. Check image matches allowed_image_prefix
-    │  4. Write image ref to .deploy.env
-    │  5. docker compose -f docker-compose.data.yml -f docker-compose.yml pull
-    │  6. docker compose -f docker-compose.data.yml -f docker-compose.yml up -d
-    │  7. Poll health URL until 2xx or timeout
-    │  8. On failure: restore .deploy.env to previous state
-    ▼
-Your App (running in Docker, proxied by Caddy)
+  │
+  ├─ Build and push image to GHCR
+  │    ghcr.io/org/app:v1.2.0
+  │
+  ├─ Sign image with Sigstore (cosign)
+  │    Identity: github.com/org/app via OIDC
+  │
+  └─ POST /v1/apps/myapp/deploy  (hint — no auth required)
+       → worker polls immediately
 ```
 
 ## App Convention
 
-Furnace is purpose-built for apps that follow the [foundry/starter](https://github.com/go-sum/foundry) pattern. Apps are expected to have:
+Furnace is purpose-built for apps that follow the [foundry/starter](https://github.com/go-sum/foundry) pattern. Each app directory (`dir` in config) must contain compose files provisioned by the operator before the first deploy:
 
 | File | Purpose |
 |------|---------|
@@ -37,39 +91,62 @@ Furnace is purpose-built for apps that follow the [foundry/starter](https://gith
 | `.deploy.env` | Written by furnace on each deploy: `APP_IMAGE=ghcr.io/org/app:v1.2.0` |
 | `.secrets/` | Docker secrets directory (DATABASE_URL, etc.) |
 
-The `web` service must be reachable on the `caddy_net` Docker network (default name) for the reverse proxy to route traffic to it.
+Compose services must attach to `caddy_net` so Caddy can reach them by container name:
 
-A production deploy is always:
-```bash
-docker compose -f docker-compose.data.yml -f docker-compose.yml up -d --remove-orphans
+```yaml
+# docker-compose.yml (excerpt)
+services:
+  web:
+    image: ${APP_IMAGE}
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
 ```
 
 ## Installation
 
 Furnace needs a Linux VPS with Docker. You only need to SSH in once.
 
-### 1. Download the binary
+### 1. Install the binary
+
+The installer downloads the binary, verifies its Sigstore signature against the
+Rekor transparency log, then installs it. Docker must be present — it is used to
+run cosign for verification and is also required to run furnace.
+
+**One-liner:**
 
 ```bash
-# amd64 (most VPS providers)
-curl -fsSL https://github.com/go-sum/furnace/releases/latest/download/furnace-linux-amd64 \
-  -o /usr/local/bin/furnace && chmod +x /usr/local/bin/furnace
-
-# arm64
-curl -fsSL https://github.com/go-sum/furnace/releases/latest/download/furnace-linux-arm64 \
-  -o /usr/local/bin/furnace && chmod +x /usr/local/bin/furnace
+curl -fsSL https://raw.githubusercontent.com/go-sum/furnace/main/install.sh | sudo bash
 ```
 
-### 2. Verify the installation
+**Inspect before running:**
 
 ```bash
-furnace --version
-# furnace version v0.x.x
+curl -fsSL https://raw.githubusercontent.com/go-sum/furnace/main/install.sh -o install.sh
+less install.sh
+sudo bash install.sh
 ```
 
-If this shows `dev` you are running an untagged build.
+**What `install.sh` does, step by step:**
 
-### 3. Initialize the VPS
+| Step | Action |
+|------|--------|
+| 1 | Detects CPU architecture (`amd64` / `arm64`) |
+| 2 | Fetches the latest release tag from the GitHub API |
+| 3 | Downloads `furnace-linux-<arch>` and `furnace-linux-<arch>.bundle` from the release |
+| 4 | Runs `cosign verify-blob` inside a `cgr.dev/chainguard/cosign` container — verifies the binary was signed by a GitHub Actions workflow in `go-sum/furnace`, that the certificate was issued by GitHub's OIDC provider, and that a valid Rekor transparency log inclusion proof exists |
+| 5 | Installs the binary to `/usr/local/bin/furnace` only if step 4 passes |
+
+If the signature check fails, the script exits before touching `/usr/local/bin`. The bundle file (certificate + transparency log entry + signature) is a Sigstore artifact produced by `cosign sign-blob` in the release workflow — the binary cannot be substituted without controlling the `go-sum/furnace` GitHub Actions OIDC identity.
+
+```bash
+furnace --version   # confirm install
+```
+
+### 2. Initialize the VPS
 
 `furnace init` is idempotent — safe to run multiple times.
 
@@ -84,7 +161,16 @@ This creates:
 - `/srv/apps/` — app directories
 - `/srv/furnace/proxy/` — Caddy reverse proxy compose setup
 - `/srv/furnace/certs/` — TLS certificates
-- Docker network `caddy_net`
+- `caddy_net` Docker bridge network
+
+### 3. Provision app directories
+
+For each app, copy its compose files into `/srv/apps/{app}/` before starting the worker. The worker manages `.deploy.env` but never writes compose files — those are your responsibility as the operator.
+
+```bash
+mkdir -p /srv/apps/myapp
+cp docker-compose.yml docker-compose.data.yml /srv/apps/myapp/
+```
 
 ### 4. Edit the config
 
@@ -92,190 +178,109 @@ This creates:
 nano /etc/furnace/furnace.yaml
 ```
 
-Fill in the GitHub audience and your management repo (the ops repo that will call management endpoints):
+Add each app you want to deploy, including `furnace-web` itself:
 
 ```yaml
-listen: "127.0.0.1:8080"
 data_dir: "/var/lib/furnace"
+poll_interval: "60s"
 
-github:
-  issuer: "https://token.actions.githubusercontent.com"
-  audience: "furnace://prod"
+apps:
+  furnace-web:
+    image: "ghcr.io/go-sum/furnace"
+    tag_pattern: "v*"
+    allowed_identity: "go-sum/furnace"
+    domain: "furnace.example.com"
+    dir: "/srv/apps/furnace-web"
+    health_url: "http://furnace-web-web-1:8080/v1/health"
 
-management:
-  repo: "yourorg/infra"
-  workflow: ".github/workflows/furnace.yml"
-  allowed_ref: "refs/heads/main"
-
-apps: {}
+  myapp:
+    image: "ghcr.io/yourorg/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "yourorg/myapp"
+    domain: "myapp.example.com"
+    dir: "/srv/apps/myapp"
+    health_url: "http://myapp-web-1:8080/healthz"
 ```
 
-### 5. Start furnace
+Validate the config before starting:
 
 ```bash
-sudo furnace systemd start
+furnace validate
 ```
 
-Writes `/etc/systemd/system/furnace.service`, runs `systemctl enable --now furnace`.
-
-Verify:
+For staging TLS with mkcert:
 
 ```bash
-furnace systemd health
-# {"status":"ok"}
-```
-
-### 6. Start the reverse proxy
-
-Furnace ships a Caddy reverse proxy configuration at `/srv/furnace/proxy/`.
-
-```bash
-sudo furnace proxy init   # generates Caddyfile from current app configs
-sudo furnace proxy up     # docker compose up -d
-```
-
-For staging with mkcert certificates:
-
-```bash
-# Install mkcert and generate certs for your domain
 mkcert -install
 mkcert -cert-file /srv/furnace/certs/local.pem -key-file /srv/furnace/certs/local-key.pem \
-  yourdomain.example.com "*.yourdomain.example.com"
+  furnace.example.com myapp.example.com
 ```
 
 For production, use a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) — Cloudflare handles TLS and Caddy runs with `auto_https off`.
 
-### 7. Close SSH
-
-All further management is done remotely via GitHub Actions. You can harden the VPS now — close unused ports and disable password authentication.
-
-To update furnace itself:
+### 5. Start everything
 
 ```bash
-furnace update
+sudo furnace start
 ```
+
+This single command:
+1. Writes `/etc/systemd/system/furnace-worker.service`
+2. Runs `systemctl daemon-reload`
+3. Generates the Caddyfile and writes proxy files to `/srv/furnace/proxy/`
+4. Starts the Caddy container (`docker compose up -d`)
+5. Enables and starts the worker (`systemctl enable --now furnace-worker`)
+
+The worker begins polling immediately. On the first cycle it will find and deploy all apps in your config, including `furnace-web`.
+
+### 6. Close SSH
+
+All further updates happen automatically — the worker polls GHCR and deploys new releases as they appear. You can harden the VPS now: close unused ports and disable password authentication.
 
 ## Adding an App
 
-Once furnace is running, apps are added via an authenticated API call from your ops repo. No SSH required.
+To add a new app after initial setup:
 
-In your `yourorg/infra` repository, create a workflow:
+1. Copy compose files to `/srv/apps/{app}/`
+2. Add the app entry to `/etc/furnace/furnace.yaml`
+3. Run `sudo furnace proxy init` to regenerate the Caddyfile
+4. Run `sudo furnace proxy up` to reload Caddy with the new route
 
-```yaml
-# .github/workflows/furnace.yml
-name: Furnace Management
+The worker picks up new apps on its next poll cycle — no restart required.
 
-on:
-  workflow_dispatch:
-    inputs:
-      app:
-        description: "App name (lowercase, hyphens ok)"
-        required: true
-      repo:
-        description: "GitHub repo (org/name)"
-        required: true
-      domain:
-        description: "Public domain for this app"
-        required: true
+## The Deploy Hint Endpoint
 
-permissions:
-  id-token: write
-
-jobs:
-  add-app:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Add app to furnace
-        run: |
-          TOKEN=$(curl -sS \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=furnace://prod" | jq -r '.value')
-
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "repo": "${{ inputs.repo }}",
-              "domain": "${{ inputs.domain }}",
-              "allowed_ref": "refs/tags/v*",
-              "workflow": ".github/workflows/deploy.yml",
-              "allowed_image_prefix": "ghcr.io/${{ inputs.repo }}:",
-              "health_url": "http://${{ inputs.app }}-web-1:8080/healthz"
-            }' \
-            https://furnace.example.com/v1/apps/${{ inputs.app }}/add
+```
+POST /v1/apps/{app}/deploy
 ```
 
-Furnace will:
-1. Validate the management OIDC token against your `management.repo` config
-2. Create `/srv/apps/{app}/` on the VPS
-3. Add the app to `furnace.yaml`
-4. Regenerate the Caddyfile with the new domain
-5. Reload Caddy
+No authentication. Signals the worker to check the registry for `{app}` immediately rather than waiting for the next poll interval. The worker still verifies the signature — the hint cannot bypass any security check.
 
-## Deploying an App
+Call it from your release workflow to reduce deploy latency:
 
-In the **app repository**, create a release workflow:
-
-```yaml
-# .github/workflows/deploy.yml
-name: Deploy
-
-on:
-  release:
-    types: [published]
-
-permissions:
-  contents: read
-  packages: write
-  id-token: write
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          push: true
-          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-
-      - name: Deploy
-        env:
-          FURNACE_URL: https://furnace.example.com
-          APP_NAME: myapp
-        run: |
-          TOKEN=$(curl -sS \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=furnace://prod" | jq -r '.value')
-
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"image\": \"ghcr.io/${{ github.repository }}:${{ github.ref_name }}\"}" \
-            "$FURNACE_URL/v1/apps/$APP_NAME/deploy"
+```bash
+curl -fsSL -X POST https://furnace.example.com/v1/apps/myapp/deploy
 ```
 
-### Deployment lifecycle
+The endpoint returns `202 Accepted` immediately; the actual deployment happens asynchronously.
 
-| Status | What happens |
-|--------|-------------|
-| `pending` | Request accepted, deployment record created, lock acquired |
-| `pulling` | `docker compose ... pull` |
-| `starting` | `docker compose ... up -d --remove-orphans` |
-| `health_check` | Polling health URL (backoff: 1s → 2s → 4s → 5s cap) |
-| `completed` | Health check passed, lock released |
-| `failed` | Stage failed, `.deploy.env` restored to previous image, lock released |
+## Monitoring
 
-### Checking status
+### Proxy status
+
+```bash
+furnace proxy status
+```
+
+### Worker logs
+
+```bash
+journalctl -u furnace-worker -f
+```
+
+Furnace emits structured JSON logs to stdout (captured by systemd).
+
+### App status
 
 ```bash
 curl -s https://furnace.example.com/v1/apps/myapp/status
@@ -287,41 +292,10 @@ curl -s https://furnace.example.com/v1/apps/myapp/status
   "app_name": "myapp",
   "image": "ghcr.io/yourorg/myapp:v1.2.0",
   "status": "completed",
-  "actor": "username",
-  "repo": "yourorg/myapp",
-  "ref": "refs/tags/v1.2.0",
   "started_at": "2025-01-15T10:30:00Z",
   "ended_at": "2025-01-15T10:30:45Z"
 }
 ```
-
-The status endpoint requires no authentication.
-
-## Monitoring
-
-### Furnace health
-
-```bash
-furnace systemd health
-# or
-curl -s http://127.0.0.1:8080/v1/health
-```
-
-### Proxy status
-
-```bash
-furnace proxy status
-```
-
-### Systemd journal
-
-```bash
-furnace systemd status
-# or
-journalctl -u furnace -f
-```
-
-Furnace emits structured JSON logs to stdout (captured by systemd).
 
 ### Audit log
 
@@ -331,114 +305,62 @@ Every deployment start, success, and failure is appended to a JSONL file:
 tail -20 /var/lib/furnace/audit/*.jsonl | jq .
 ```
 
-### Deployment history
-
-Records are stored as JSON files in `<data_dir>/deployments/<app>/`. Furnace keeps the 20 most recent per app.
-
-## API Reference
-
-All endpoints return JSON. Authenticated endpoints require `Authorization: Bearer <oidc-token>`.
-
-### `GET /v1/health`
-
-No auth. Not rate-limited. For uptime monitors.
-
-**Response:** `200 OK` → `{"status":"ok"}`
-
-### `POST /v1/apps/{app}/add`
-
-Register a new app. Requires management repo OIDC token.
-
-**Body:**
-```json
-{
-  "repo": "org/myapp",
-  "domain": "myapp.example.com",
-  "allowed_ref": "refs/tags/v*",
-  "workflow": ".github/workflows/deploy.yml",
-  "allowed_image_prefix": "ghcr.io/org/myapp:",
-  "health_url": "http://myapp-web-1:8080/healthz",
-  "health_timeout": "30s",
-  "port": 8080
-}
-```
-
-| Status | Meaning |
-|--------|---------|
-| `201 Created` | App registered, Caddyfile updated |
-| `400 Bad Request` | Invalid app name, missing required field, invalid ref pattern |
-| `401 Unauthorized` | Missing or invalid token |
-| `403 Forbidden` | Token is not from the management repo |
-| `409 Conflict` | App name already exists |
-
-### `POST /v1/apps/{app}/deploy`
-
-Trigger a deployment. Requires app OIDC token (must match app's `repo`, `allowed_ref`, and `workflow`).
-
-**Body:** `{"image": "ghcr.io/org/app:v1.0.0"}`
-
-| Status | Meaning |
-|--------|---------|
-| `202 Accepted` | Deployment started (async) |
-| `400 Bad Request` | Missing or invalid image |
-| `401 Unauthorized` | Missing or invalid token |
-| `403 Forbidden` | Repo/ref/workflow/image not allowed |
-| `404 Not Found` | Unknown app |
-| `409 Conflict` | Deployment already in progress |
-| `429 Too Many Requests` | Rate limit exceeded (20 burst, 10/sec) |
-
-### `GET /v1/apps/{app}/status`
-
-Latest deployment record. No auth required.
-
-Returns `{"status":"no deployments"}` if the app has never been deployed.
-
 ## Configuration Reference
 
 `/etc/furnace/furnace.yaml`:
 
 ```yaml
-# Loopback address only — furnace enforces this.
-listen: "127.0.0.1:8080"
-
 # Deployment records, audit logs, locks, env backups.
 data_dir: "/var/lib/furnace"
 
-github:
-  issuer: "https://token.actions.githubusercontent.com"  # fixed value for GitHub Actions
-  audience: "furnace://prod"  # must match the audience in your workflows
-
-# Ops repo that can call management endpoints (add app, etc.)
-management:
-  repo: "yourorg/infra"
-  workflow: ".github/workflows/furnace.yml"
-  allowed_ref: "refs/heads/main"
+# How often to poll each app's registry. The /deploy hint can short-circuit to 1s.
+poll_interval: "60s"
 
 apps:
   myapp:
-    repo: "yourorg/myapp"                       # required
-    allowed_ref: "refs/tags/v*"                 # required — glob (path.Match rules)
-    workflow: ".github/workflows/deploy.yml"    # required — must be in .github/workflows/
-    dir: "/srv/apps/myapp"                      # required — absolute path on VPS
-    domain: "myapp.example.com"                 # required — for Caddyfile generation
-    port: 8080                                  # default 8080
+    # Base image path in GHCR (without tag).
+    image: "ghcr.io/yourorg/myapp"
 
-    # Compose files, relative to dir (foundry/starter convention)
+    # Glob pattern for tags to watch (path.Match rules). "v*" matches v1.0.0, etc.
+    tag_pattern: "v*"
+
+    # GitHub org/repo whose Sigstore identity must have signed the image.
+    allowed_identity: "yourorg/myapp"
+
+    # Public domain for Caddyfile generation. Must be lowercase (e.g. myapp.example.com).
+    domain: "myapp.example.com"
+
+    # Absolute path to the app directory on the VPS (default: /srv/apps/{name}).
+    dir: "/srv/apps/myapp"
+
+    # Port the app's web container listens on (default: 8080).
+    # Caddy routes via container DNS: {name}-web-1:{port}
+    port: 8080
+
+    # Compose files relative to dir (default: [docker-compose.data.yml, docker-compose.yml]).
+    # These are operator-provisioned; furnace never writes them.
     compose_files:
       - docker-compose.data.yml
       - docker-compose.yml
 
-    env_file: ".deploy.env"                     # default
-    image_var: "APP_IMAGE"                      # default
-    allowed_image_prefix: "ghcr.io/yourorg/myapp:"  # required
+    # Env file and variable written by furnace on each deploy.
+    env_file: ".deploy.env"    # default
+    image_var: "APP_IMAGE"     # default
 
-    health_url: "http://myapp-web-1:8080/healthz"   # required
-    health_timeout: "30s"                            # default
+    # Health check endpoint polled after docker compose up.
+    # Uses container DNS — app containers are reachable on caddy_net.
+    health_url: "http://myapp-web-1:8080/healthz"
+    health_timeout: "30s"
 ```
+
+Use `furnace validate` to check your config file for errors without starting the worker.
 
 ## Data Layout
 
 ```
+/etc/furnace/
+  furnace.yaml              # app configuration
+
 /var/lib/furnace/
   deployments/
     myapp/
@@ -453,10 +375,10 @@ apps:
 
 /srv/apps/
   myapp/
-    docker-compose.data.yml
-    docker-compose.yml
-    .deploy.env             # written by furnace on each deploy
-    .secrets/               # Docker secrets directory
+    docker-compose.data.yml  # operator-provisioned
+    docker-compose.yml       # operator-provisioned
+    .deploy.env              # written by furnace on each deploy
+    .secrets/                # Docker secrets directory
 
 /srv/furnace/proxy/
   compose.yml               # Caddy Docker Compose
@@ -469,18 +391,20 @@ apps:
 
 ## Security Model
 
-- **No shared secrets.** Every authenticated request carries a cryptographically signed GitHub OIDC JWT, verified against GitHub's public keys.
-- **Loopback-only listener.** Furnace refuses to bind to non-loopback addresses. All external traffic passes through the Caddy reverse proxy.
-- **Systemd hardening.** `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, 256MB memory limit.
-- **Image prefix validation.** Only images with the configured prefix are accepted — a token from the right repo can't deploy an arbitrary image.
-- **Workflow identity pinning.** Both `workflow_ref` and `job_workflow_ref` OIDC claims are checked against the configured workflow path, preventing deployment from any other workflow file.
-- **Ref pattern matching.** `allowed_ref` restricts which branches or tags can trigger deploys.
-- **Management separation.** App deploy tokens cannot call management endpoints; only tokens from the dedicated management repo can register or remove apps.
+- **Pull-based, no inbound webhooks.** The worker initiates all outbound connections to GHCR and Sigstore. No credentials are stored; no inbound network access is required beyond the hint endpoint.
+- **Sigstore signature verification.** Every image must be signed by a GitHub Actions workflow from the configured `allowed_identity` repository. The signature is verified against Sigstore's public transparency log (Rekor). An unsigned or incorrectly signed image is rejected before any deployment step runs.
+- **No shared secrets.** Registry access uses GHCR's anonymous pull for public images or a credential helper for private ones. Signing identity is verified cryptographically, not via a pre-shared token.
+- **Operator-controlled compose files.** Compose files live on disk and are never fetched from a remote source. Only the image digest changes per deploy — written to `.deploy.env`. This eliminates remote compose-as-control-plane as an attack vector.
+- **Executor subcommand allowlist.** The worker only permits `docker compose` subcommands. `docker run`, `docker exec`, and similar privileged primitives are rejected at the executor layer.
+- **Domain validation.** The `domain` field is validated against an RFC 1123 hostname regex at config load time, preventing Caddyfile directive injection via malformed domain values.
+- **caddy_net isolation.** Caddy and app containers share a single Docker bridge network. Containers are reachable only by name within the network; no host ports are published for app-to-Caddy routing.
+- **Caddy container hardening.** Caddy runs with `read_only: true`, `cap_drop: [ALL]`, `cap_add: [NET_BIND_SERVICE]`, `no-new-privileges`, and a tmpfs `/tmp`.
+- **Distroless worker image.** The furnace binary is packaged in `gcr.io/distroless/static-debian12:nonroot` — no shell, no package manager, no setuid binaries.
+- **Systemd hardening.** Worker unit includes: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, scoped `ReadWritePaths`, `CapabilityBoundingSet=` (empty), `SystemCallFilter=@system-service`, `PrivateDevices`, `RestrictAddressFamilies`, `LockPersonality`, `MemoryDenyWriteExecute`, `RestrictNamespaces`, `ProtectKernelTunables`, `ProtectControlGroups`, `RestrictSUIDSGID`.
 - **Flock-based deploy lock.** One deployment per app at a time, survives process restarts.
-- **Env file rollback.** On failure, `.deploy.env` is restored so the next `docker compose up` uses the last known-good image.
-- **Rate limiting.** 20 burst / 10 per second per IP. Health endpoint excluded.
-- **Request size limit.** Bodies capped at 1MB.
+- **Env file rollback.** On failure, `.deploy.env` is restored so the next compose up uses the last known-good image.
 - **Audit trail.** All deployment events logged to append-only JSONL.
+- **Status endpoint exposure.** The `/v1/apps/{app}/status` endpoint returns deployment metadata. Restrict access to trusted networks via firewall rules or a Cloudflare Tunnel access policy if your VPS is publicly reachable.
 
 ## License
 

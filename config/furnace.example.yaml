@@ -1,64 +1,47 @@
 # Furnace — Secure VPS Deployment Agent
-# Listens on localhost only; use a reverse proxy (Caddy/nginx) for TLS termination.
+# Edit this file during initial setup (one-time SSH), then close SSH.
+# Furnace polls GHCR every poll_interval and deploys signed images automatically.
 
-listen: "127.0.0.1:8080"
 data_dir: "/var/lib/furnace"
 
-github:
-  issuer: "https://token.actions.githubusercontent.com"
-  audience: "furnace://prod"
-
-# Ops repo that can call management endpoints (add app, etc.)
-management:
-  repo: "yourorg/infra"
-  workflow: ".github/workflows/furnace.yml"
-  allowed_ref: "refs/heads/main"
+# How often to check each app's registry for a new image tag.
+# The /v1/apps/{app}/deploy endpoint can short-circuit this to 1s.
+poll_interval: "60s"
 
 apps:
   myapp:
-    # GitHub repository that is allowed to trigger deployments
-    repo: "org/repo"
+    # Base image reference (without tag). The worker resolves the latest tag
+    # matching tag_pattern from this registry path.
+    image: "ghcr.io/yourorg/myapp"
 
-    # Glob pattern for allowed refs (uses path.Match rules).
-    # * matches any sequence of non-/ characters.
-    # "refs/tags/v*"  → matches refs/tags/v1.0.0 but NOT refs/tags/v1/rc1
-    # "refs/heads/main" → exact branch match
-    # "refs/heads/*"  → any single-segment branch (not release/1.0)
-    allowed_ref: "refs/tags/v*"
+    # Glob pattern (path.Match rules) for which tags to watch.
+    # "v*" matches v1.0.0, v1.2.3 — any tag starting with v.
+    tag_pattern: "v*"
 
-    # Only allow deployments from this workflow file
-    workflow: ".github/workflows/release.yml"
+    # GitHub repository whose Sigstore OIDC identity must sign the image.
+    # Only images signed by a GitHub Actions workflow from this repo are accepted.
+    allowed_identity: "yourorg/myapp"
 
-    # Directory containing the compose file on the VPS
-    dir: "/srv/apps/myapp"
-
-    # Public domain for this app (used for Caddy reverse proxy configuration)
+    # Public domain for this app (used to generate the Caddyfile).
     domain: "myapp.example.com"
 
-    # Port the app's web service listens on (default: 8080)
+    # Port the app's web container listens on (default: 8080).
     port: 8080
 
-    # Docker Compose files (foundry/starter convention)
+    # Absolute path to the app directory on the VPS.
+    dir: "/srv/apps/myapp"
+
+    # Docker Compose files relative to dir (foundry/starter convention).
     # Default when omitted: [docker-compose.data.yml, docker-compose.yml]
     compose_files:
       - docker-compose.data.yml
       - docker-compose.yml
+
+    # Env file and variable written by furnace on each deploy.
     env_file: ".deploy.env"
     image_var: "APP_IMAGE"
 
-    # Only images with this prefix are accepted
-    allowed_image_prefix: "ghcr.io/org/repo:"
-
-    # Health check endpoint (polled after deployment)
+    # Health check endpoint polled after docker compose up.
+    # Uses container DNS — app containers are reachable on caddy_net.
     health_url: "http://myapp-web-1:8080/healthz"
     health_timeout: "30s"
-
-    # Phase 2: backup before migration
-    # backup:
-    #   enabled: true
-    #   args: ["compose", "exec", "-T", "db", "pg_dump", "-U", "postgres", "-Fc", "myapp"]
-
-    # Phase 2: run migrations before starting new containers
-    # migrate:
-    #   enabled: true
-    #   args: ["compose", "run", "--rm", "app", "./app", "migrate"]

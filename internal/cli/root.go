@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/go-sum/furnace/internal/app"
 )
 
 // Version is set at build time via -ldflags "-X github.com/go-sum/furnace/internal/cli.Version=vX.Y.Z".
@@ -24,12 +26,29 @@ func NewRootCommand() *cobra.Command {
 		"path to configuration file")
 
 	root.AddCommand(
-		newServeCmd(&configPath),
 		newInitCmd(),
-		newSystemdCmd(&configPath),
+		newStartCmd(&configPath),
+		newWebCmd(&configPath),
+		newWorkerCmd(&configPath),
 		newProxyCmd(&configPath),
-		newUpdateCmd(),
+		newValidateCmd(&configPath),
 	)
 
 	return root
+}
+
+func newValidateCmd(configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "validate",
+		Short: "Validate configuration file",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := app.LoadConfig(*configPath)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "config ok: %d app(s)\n", len(cfg.Apps))
+			return nil
+		},
+	}
 }

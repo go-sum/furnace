@@ -14,7 +14,6 @@ import (
 	"github.com/go-sum/foundry/pkg/web/serve"
 
 	"github.com/go-sum/furnace/internal/audit"
-	"github.com/go-sum/furnace/internal/auth"
 	"github.com/go-sum/furnace/internal/deploy"
 	"github.com/go-sum/furnace/internal/handler"
 	"github.com/go-sum/furnace/internal/model"
@@ -29,11 +28,6 @@ type App struct {
 }
 
 func New(ctx context.Context, cfg *Config, logger *slog.Logger) (*App, error) {
-	verifier, err := auth.NewOIDCVerifier(ctx, cfg.GitHub.Issuer, cfg.GitHub.Audience)
-	if err != nil {
-		return nil, fmt.Errorf("create OIDC verifier: %w", err)
-	}
-
 	executor := deploy.NewDockerExecutor()
 	lock := deploy.NewFileLock(filepath.Join(cfg.DataDir, "locks"))
 	health := deploy.NewHTTPHealthChecker()
@@ -63,8 +57,13 @@ func New(ctx context.Context, cfg *Config, logger *slog.Logger) (*App, error) {
 	})
 	svc.ReconcileOnStartup(ctx)
 
+	appNames := make(map[string]struct{}, len(apps))
+	for name := range apps {
+		appNames[name] = struct{}{}
+	}
+
 	handlers := Handlers{
-		Deploy: handler.NewDeployHandler(svc, cfg.AppConfig),
+		Hint:   handler.NewHintHandler(cfg.DataDir, appNames),
 		Status: handler.NewStatusHandler(svc),
 		Health: handler.NewHealthHandler(),
 	}
@@ -101,7 +100,7 @@ func New(ctx context.Context, cfg *Config, logger *slog.Logger) (*App, error) {
 	rt.Use(web.WithMaxBody(1 << 20))
 	rt.Use(rateMW)
 
-	RegisterRoutes(rt, handlers, verifier, logger)
+	RegisterRoutes(rt, handlers)
 
 	return &App{
 		Handler:       rt.Serve,

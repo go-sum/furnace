@@ -24,8 +24,8 @@ func TestFileDeploymentStore_SaveAndGetLatest(t *testing.T) {
 		ID:        "01ABC",
 		AppName:   "myapp",
 		Image:     "ghcr.io/org/repo:v1.0.0",
+		Tag:       "v1.0.0",
 		Status:    model.StatusCompleted,
-		Actor:     "bot",
 		StartedAt: time.Now().Add(-10 * time.Second),
 		EndedAt:   time.Now(),
 	}

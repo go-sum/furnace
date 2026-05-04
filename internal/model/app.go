@@ -2,25 +2,18 @@ package model
 
 import "time"
 
+// AppConfig is the resolved, validated configuration for a single app.
 type AppConfig struct {
-	Name               string        `yaml:"-"`
-	Repo               string        `yaml:"repo"`
-	AllowedRef         string        `yaml:"allowed_ref"`
-	Workflow           string        `yaml:"workflow"`
-	Dir                string        `yaml:"dir"`
-	Domain             string        `yaml:"domain"`
-	Port               int           `yaml:"port"`
-	ComposeFiles       []string      `yaml:"compose_files"`
-	EnvFile            string        `yaml:"env_file"`
-	ImageVar           string        `yaml:"image_var"`
-	AllowedImagePrefix string        `yaml:"allowed_image_prefix"`
-	HealthURL          string        `yaml:"health_url"`
-	HealthTimeout      time.Duration `yaml:"health_timeout"`
-	Backup             CommandConfig `yaml:"backup"`
-	Migrate            CommandConfig `yaml:"migrate"`
-}
-
-type CommandConfig struct {
-	Enabled bool     `yaml:"enabled"`
-	Args    []string `yaml:"args"`
+	Name            string
+	Image           string        // base image ref without tag: ghcr.io/org/myapp
+	TagPattern      string        // glob for tags to watch: v*
+	AllowedIdentity string        // Sigstore OIDC identity: org/myapp (GitHub repo slug)
+	Dir             string        // on-disk location: /srv/apps/myapp
+	Domain          string        // Caddy vhost: myapp.example.com
+	Port            int
+	ComposeFiles    []string      // relative paths: [docker-compose.data.yml, docker-compose.yml]
+	EnvFile         string        // relative path: .deploy.env
+	ImageVar        string        // env var name: APP_IMAGE
+	HealthURL       string        // full URL: http://myapp-web-1:8080/healthz
+	HealthTimeout   time.Duration
 }

@@ -16,6 +16,7 @@ import (
 
 const caddyfileTmpl = `{
 	auto_https off
+	admin off
 }
 {{range .}}
 {{.Domain}} {

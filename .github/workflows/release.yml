@@ -6,10 +6,11 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: write   # upload release assets
+  id-token: write   # OIDC token for Sigstore keyless signing
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -26,6 +27,9 @@ jobs:
         with:
           go-version: "1.26"
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
@@ -37,7 +41,15 @@ jobs:
             -o furnace-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/furnace
 
-      - name: Upload release asset
+      - name: Sign binary
+        run: |
+          cosign sign-blob --yes \
+            --bundle furnace-${{ matrix.goos }}-${{ matrix.goarch }}.bundle \
+            furnace-${{ matrix.goos }}-${{ matrix.goarch }}
+
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: furnace-${{ matrix.goos }}-${{ matrix.goarch }}
+          files: |
+            furnace-${{ matrix.goos }}-${{ matrix.goarch }}
+            furnace-${{ matrix.goos }}-${{ matrix.goarch }}.bundle

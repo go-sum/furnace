@@ -6,33 +6,70 @@ import (
 	"testing"
 )
 
+// validAppYAML returns a minimal valid app entry for use in config snippets.
+func validAppYAML(name string) string {
+	return `
+data_dir: "/var/lib/furnace"
+apps:
+  ` + name + `:
+    image: "ghcr.io/org/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "org/myapp"
+    domain: "myapp.example.com"
+    health_url: "http://` + name + `-web-1:8080/healthz"
+`
+}
+
+func TestLoadConfig_Defaults(t *testing.T) {
+	path := writeConfig(t, validAppYAML("myapp"))
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.DataDir != "/var/lib/furnace" {
+		t.Fatalf("unexpected data_dir: %q", cfg.DataDir)
+	}
+
+	appCfg, ok := cfg.AppConfig("myapp")
+	if !ok {
+		t.Fatal("expected app config")
+	}
+	if appCfg.Port != 8080 {
+		t.Fatalf("expected default port 8080, got %d", appCfg.Port)
+	}
+	if appCfg.Dir != "/srv/apps/myapp" {
+		t.Fatalf("expected default dir /srv/apps/myapp, got %q", appCfg.Dir)
+	}
+	if appCfg.ImageVar != "APP_IMAGE" {
+		t.Fatalf("expected default image_var APP_IMAGE, got %q", appCfg.ImageVar)
+	}
+	if len(appCfg.ComposeFiles) != 2 || appCfg.ComposeFiles[0] != "docker-compose.data.yml" {
+		t.Fatalf("unexpected default compose files: %v", appCfg.ComposeFiles)
+	}
+	if appCfg.EnvFile != ".deploy.env" {
+		t.Fatalf("expected default env_file .deploy.env, got %q", appCfg.EnvFile)
+	}
+}
+
 func TestLoadConfig_NormalizesRelativePaths(t *testing.T) {
 	path := writeConfig(t, `
-listen: "127.0.0.1:8080"
 data_dir: "/var/lib/furnace"
-github:
-  issuer: "https://token.actions.githubusercontent.com"
-  audience: "furnace://prod"
 apps:
   myapp:
-    repo: "org/repo"
-    allowed_ref: "refs/tags/v*"
-    workflow: ".github/workflows/release.yml"
-    dir: "/srv/apps/myapp"
+    image: "ghcr.io/org/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "org/myapp"
     domain: "myapp.example.com"
     compose_files:
       - "nested/../docker-compose.data.yml"
       - "docker-compose.yml"
     env_file: "./configs/../.deploy.env"
-    allowed_image_prefix: "ghcr.io/org/repo:"
-    health_url: "http://127.0.0.1:8080/health"
+    health_url: "http://myapp-web-1:8080/healthz"
 `)
-
 	cfg, err := LoadConfig(path)
 	if err != nil {
-		t.Fatalf("LoadConfig returned error: %v", err)
+		t.Fatalf("LoadConfig: %v", err)
 	}
-
 	appCfg, ok := cfg.AppConfig("myapp")
 	if !ok {
 		t.Fatal("expected app config")
@@ -47,104 +84,68 @@ apps:
 
 func TestLoadConfig_RejectsTraversingEnvFile(t *testing.T) {
 	path := writeConfig(t, `
-listen: "127.0.0.1:8080"
-github:
-  issuer: "https://token.actions.githubusercontent.com"
-  audience: "furnace://prod"
+data_dir: "/var/lib/furnace"
 apps:
   myapp:
-    repo: "org/repo"
-    allowed_ref: "refs/tags/v*"
-    workflow: ".github/workflows/release.yml"
-    dir: "/srv/apps/myapp"
+    image: "ghcr.io/org/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "org/myapp"
     domain: "myapp.example.com"
     env_file: "../escape.env"
-    allowed_image_prefix: "ghcr.io/org/repo:"
-    health_url: "http://127.0.0.1:8080/health"
+    health_url: "http://myapp-web-1:8080/healthz"
 `)
-
 	_, err := LoadConfig(path)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	expected := "app \"myapp\": env_file: path must not escape the app directory"
-	if err.Error() != expected {
-		t.Fatalf("LoadConfig error mismatch:\ngot  %q\nwant %q", err.Error(), expected)
+	want := `app "myapp": env_file: path must not escape the app directory`
+	if err.Error() != want {
+		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
 	}
 }
 
 func TestLoadConfig_RejectsAbsoluteComposeFile(t *testing.T) {
 	path := writeConfig(t, `
-listen: "127.0.0.1:8080"
-github:
-  issuer: "https://token.actions.githubusercontent.com"
-  audience: "furnace://prod"
+data_dir: "/var/lib/furnace"
 apps:
   myapp:
-    repo: "org/repo"
-    allowed_ref: "refs/tags/v*"
-    workflow: ".github/workflows/release.yml"
-    dir: "/srv/apps/myapp"
+    image: "ghcr.io/org/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "org/myapp"
     domain: "myapp.example.com"
     compose_files:
       - "/tmp/compose.yml"
-    allowed_image_prefix: "ghcr.io/org/repo:"
-    health_url: "http://127.0.0.1:8080/health"
+    health_url: "http://myapp-web-1:8080/healthz"
 `)
-
 	_, err := LoadConfig(path)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	expected := "app \"myapp\": compose_files[0]: path must be relative"
-	if err.Error() != expected {
-		t.Fatalf("LoadConfig error mismatch:\ngot  %q\nwant %q", err.Error(), expected)
+	want := `app "myapp": compose_files[0]: path must be relative`
+	if err.Error() != want {
+		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
 	}
 }
 
 func TestLoadConfig_RejectsInvalidHealthURLScheme(t *testing.T) {
 	path := writeConfig(t, `
-listen: "127.0.0.1:8080"
-github:
-  issuer: "https://token.actions.githubusercontent.com"
-  audience: "furnace://prod"
+data_dir: "/var/lib/furnace"
 apps:
   myapp:
-    repo: "org/repo"
-    allowed_ref: "refs/tags/v*"
-    workflow: ".github/workflows/release.yml"
-    dir: "/srv/apps/myapp"
+    image: "ghcr.io/org/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "org/myapp"
     domain: "myapp.example.com"
-    allowed_image_prefix: "ghcr.io/org/repo:"
-    health_url: "ftp://127.0.0.1/health"
+    health_url: "ftp://myapp-web-1/healthz"
 `)
-
 	_, err := LoadConfig(path)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	expected := "app \"myapp\": health_url must use http or https"
-	if err.Error() != expected {
-		t.Fatalf("LoadConfig error mismatch:\ngot  %q\nwant %q", err.Error(), expected)
+	want := `app "myapp": health_url must use http or https`
+	if err.Error() != want {
+		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
 	}
-}
-
-func validAppConfig(name string) string {
-	return `
-listen: "127.0.0.1:8080"
-github:
-  issuer: "https://token.actions.githubusercontent.com"
-  audience: "furnace://prod"
-apps:
-  ` + name + `:
-    repo: "org/repo"
-    allowed_ref: "refs/tags/v*"
-    workflow: ".github/workflows/release.yml"
-    dir: "/srv/apps/myapp"
-    domain: "myapp.example.com"
-    allowed_image_prefix: "ghcr.io/org/repo:"
-    health_url: "http://127.0.0.1:8080/health"
-`
 }
 
 func TestLoadConfig_RejectsInvalidAppName(t *testing.T) {
@@ -153,14 +154,12 @@ func TestLoadConfig_RejectsInvalidAppName(t *testing.T) {
 		appName string
 	}{
 		{"uppercase", "MyApp"},
-		{"path traversal", "../evil"},
 		{"spaces", "my app"},
 		{"starts with dash", "-myapp"},
 	}
-
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			path := writeConfig(t, validAppConfig(tc.appName))
+			path := writeConfig(t, validAppYAML(tc.appName))
 			_, err := LoadConfig(path)
 			if err == nil {
 				t.Fatalf("expected error for app name %q", tc.appName)
@@ -170,10 +169,9 @@ func TestLoadConfig_RejectsInvalidAppName(t *testing.T) {
 }
 
 func TestLoadConfig_AcceptsValidAppNames(t *testing.T) {
-	cases := []string{"myapp", "my-app", "my_app", "app1", "a"}
-	for _, name := range cases {
+	for _, name := range []string{"myapp", "my-app", "my_app", "app1", "a"} {
 		t.Run(name, func(t *testing.T) {
-			path := writeConfig(t, validAppConfig(name))
+			path := writeConfig(t, validAppYAML(name))
 			_, err := LoadConfig(path)
 			if err != nil {
 				t.Fatalf("expected valid name %q to pass, got: %v", name, err)
@@ -182,51 +180,50 @@ func TestLoadConfig_AcceptsValidAppNames(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_RejectsInvalidImageVar(t *testing.T) {
+func TestLoadConfig_RejectsAllowedIdentityWithoutSlash(t *testing.T) {
 	path := writeConfig(t, `
-listen: "127.0.0.1:8080"
-github:
-  issuer: "https://token.actions.githubusercontent.com"
-  audience: "furnace://prod"
+data_dir: "/var/lib/furnace"
 apps:
   myapp:
-    repo: "org/repo"
-    allowed_ref: "refs/tags/v*"
-    workflow: ".github/workflows/release.yml"
-    dir: "/srv/apps/myapp"
+    image: "ghcr.io/org/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "notaslug"
     domain: "myapp.example.com"
-    allowed_image_prefix: "ghcr.io/org/repo:"
-    health_url: "http://127.0.0.1:8080/health"
-    image_var: "lower_case"
+    health_url: "http://myapp-web-1:8080/healthz"
 `)
-
 	_, err := LoadConfig(path)
 	if err == nil {
-		t.Fatal("expected error for invalid image_var")
+		t.Fatal("expected error")
+	}
+	want := `app "myapp": allowed_identity must be in org/repo format`
+	if err.Error() != want {
+		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
 	}
 }
 
-func TestLoadConfig_DefaultImageVar(t *testing.T) {
-	path := writeConfig(t, validAppConfig("myapp"))
-	cfg, err := LoadConfig(path)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
+func TestLoadConfig_RequiresDomain(t *testing.T) {
+	path := writeConfig(t, `
+data_dir: "/var/lib/furnace"
+apps:
+  myapp:
+    image: "ghcr.io/org/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "org/myapp"
+    health_url: "http://myapp-web-1:8080/healthz"
+`)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for missing domain")
 	}
-	appCfg, ok := cfg.AppConfig("myapp")
-	if !ok {
-		t.Fatal("expected app config")
-	}
-	if appCfg.ImageVar != "APP_IMAGE" {
-		t.Fatalf("expected default APP_IMAGE, got %q", appCfg.ImageVar)
+	want := `app "myapp": domain is required`
+	if err.Error() != want {
+		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
 	}
 }
 
 func TestLoadConfig_EmptyApps(t *testing.T) {
 	path := writeConfig(t, `
-listen: "127.0.0.1:8080"
-github:
-  issuer: "https://token.actions.githubusercontent.com"
-  audience: "furnace://prod"
+data_dir: "/var/lib/furnace"
 apps: {}
 `)
 	cfg, err := LoadConfig(path)
@@ -238,110 +235,53 @@ apps: {}
 	}
 }
 
-func TestLoadConfig_DefaultComposeFiles(t *testing.T) {
-	path := writeConfig(t, validAppConfig("myapp"))
-	cfg, err := LoadConfig(path)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	appCfg, ok := cfg.AppConfig("myapp")
-	if !ok {
-		t.Fatal("expected app config")
-	}
-	if len(appCfg.ComposeFiles) != 2 {
-		t.Fatalf("expected 2 default compose files, got %d", len(appCfg.ComposeFiles))
-	}
-	if appCfg.ComposeFiles[0] != "docker-compose.data.yml" || appCfg.ComposeFiles[1] != "docker-compose.yml" {
-		t.Fatalf("unexpected default compose files: %v", appCfg.ComposeFiles)
-	}
-}
-
-func TestLoadConfig_DefaultPort(t *testing.T) {
-	path := writeConfig(t, validAppConfig("myapp"))
-	cfg, err := LoadConfig(path)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	appCfg, ok := cfg.AppConfig("myapp")
-	if !ok {
-		t.Fatal("expected app config")
-	}
-	if appCfg.Port != 8080 {
-		t.Fatalf("expected default port 8080, got %d", appCfg.Port)
-	}
-}
-
-func TestLoadConfig_RequiresDomain(t *testing.T) {
-	path := writeConfig(t, `
-listen: "127.0.0.1:8080"
-github:
-  issuer: "https://token.actions.githubusercontent.com"
-  audience: "furnace://prod"
+func TestLoadConfig_ValidDomains(t *testing.T) {
+	for _, domain := range []string{"myapp.example.com", "sub.deep.example.co.uk", "a.io"} {
+		t.Run(domain, func(t *testing.T) {
+			path := writeConfig(t, `
+data_dir: "/var/lib/furnace"
 apps:
   myapp:
-    repo: "org/repo"
-    allowed_ref: "refs/tags/v*"
-    workflow: ".github/workflows/release.yml"
-    dir: "/srv/apps/myapp"
-    allowed_image_prefix: "ghcr.io/org/repo:"
-    health_url: "http://127.0.0.1:8080/health"
+    image: "ghcr.io/org/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "org/myapp"
+    domain: "`+domain+`"
+    health_url: "http://myapp-web-1:8080/healthz"
 `)
-	_, err := LoadConfig(path)
-	if err == nil {
-		t.Fatal("expected error for missing domain")
-	}
-	expected := "app \"myapp\": domain is required"
-	if err.Error() != expected {
-		t.Fatalf("LoadConfig error mismatch:\ngot  %q\nwant %q", err.Error(), expected)
+			_, err := LoadConfig(path)
+			if err != nil {
+				t.Fatalf("expected valid domain %q to pass, got: %v", domain, err)
+			}
+		})
 	}
 }
 
-func TestLoadConfig_ManagementValidation(t *testing.T) {
+func TestLoadConfig_RejectsInvalidDomains(t *testing.T) {
 	cases := []struct {
-		name    string
-		section string
-		wantErr string
+		name   string
+		domain string
 	}{
-		{
-			"missing workflow",
-			`management:
-  repo: "org/infra"
-  allowed_ref: "refs/heads/main"`,
-			"management: workflow is required",
-		},
-		{
-			"invalid workflow path",
-			`management:
-  repo: "org/infra"
-  workflow: "scripts/deploy.sh"
-  allowed_ref: "refs/heads/main"`,
-			"management: workflow must be a .github/workflows path",
-		},
-		{
-			"missing allowed_ref",
-			`management:
-  repo: "org/infra"
-  workflow: ".github/workflows/furnace.yml"`,
-			"management: allowed_ref is required",
-		},
+		{"newline injection", "evil\n{inject}"},
+		{"spaces", "has spaces.com"},
+		{"uppercase", "UPPER.COM"},
+		{"bare tld", "bare-tld"},
+		{"leading dash", "-leading.com"},
 	}
-
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeConfig(t, `
-listen: "127.0.0.1:8080"
-github:
-  issuer: "https://token.actions.githubusercontent.com"
-  audience: "furnace://prod"
-`+tc.section+`
-apps: {}
+data_dir: "/var/lib/furnace"
+apps:
+  myapp:
+    image: "ghcr.io/org/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "org/myapp"
+    domain: "`+tc.domain+`"
+    health_url: "http://myapp-web-1:8080/healthz"
 `)
 			_, err := LoadConfig(path)
 			if err == nil {
-				t.Fatal("expected error")
-			}
-			if err.Error() != tc.wantErr {
-				t.Fatalf("LoadConfig error mismatch:\ngot  %q\nwant %q", err.Error(), tc.wantErr)
+				t.Fatalf("expected domain %q to be rejected", tc.domain)
 			}
 		})
 	}
@@ -349,7 +289,6 @@ apps: {}
 
 func writeConfig(t *testing.T, contents string) string {
 	t.Helper()
-
 	path := filepath.Join(t.TempDir(), "furnace.yaml")
 	if err := os.WriteFile(path, []byte(contents), 0640); err != nil {
 		t.Fatalf("write config: %v", err)
