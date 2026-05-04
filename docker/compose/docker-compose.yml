@@ -1,0 +1,13 @@
+services:
+  web:
+    image: ${APP_IMAGE}
+    restart: unless-stopped
+    volumes:
+      - /etc/furnace/furnace.yaml:/etc/furnace/furnace.yaml:ro
+      - /var/lib/furnace:/var/lib/furnace
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true

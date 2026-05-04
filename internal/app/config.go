@@ -35,6 +35,7 @@ type AppRaw struct {
 	ImageVar        string        `yaml:"image_var"`
 	HealthURL       string        `yaml:"health_url"`
 	HealthTimeout   time.Duration `yaml:"health_timeout"`
+	ComposeArtifact string        `yaml:"compose_artifact"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -84,6 +85,7 @@ func (c *Config) AppConfig(name string) (model.AppConfig, bool) {
 		ImageVar:        raw.ImageVar,
 		HealthURL:       raw.HealthURL,
 		HealthTimeout:   cmp.Or(raw.HealthTimeout, 30*time.Second),
+		ComposeArtifact: raw.ComposeArtifact,
 	}, true
 }
 

@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write   # upload release assets
   id-token: write   # OIDC token for Sigstore keyless signing
+  packages: write   # push OCI artifacts to GHCR
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   release:
@@ -53,3 +57,28 @@ jobs:
           files: |
             furnace-${{ matrix.goos }}-${{ matrix.goarch }}
             furnace-${{ matrix.goos }}-${{ matrix.goarch }}.bundle
+
+  compose-artifact:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oras-project/setup-oras@v1
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push compose artifact
+        run: |
+          oras push "ghcr.io/go-sum/furnace:${{ github.ref_name }}-compose" \
+            --artifact-type application/vnd.furnace.compose \
+            docker/compose/docker-compose.yml:application/yaml
+
+      - name: Sign compose artifact
+        run: |
+          DIGEST=$(oras manifest fetch --descriptor \
+            "ghcr.io/go-sum/furnace:${{ github.ref_name }}-compose" | jq -r '.digest')
+          cosign sign --yes "ghcr.io/go-sum/furnace@${DIGEST}"

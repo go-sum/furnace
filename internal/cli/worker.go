@@ -49,6 +49,8 @@ func newWorkerCmd(configPath *string) *cobra.Command {
 				return fmt.Errorf("init sigstore verifier: %w", err)
 			}
 
+			composeFetcher := deploy.NewArtifactFetcher(verifier)
+
 			executor := deploy.NewDockerExecutor()
 			lock := deploy.NewFileLock(filepath.Join(cfg.DataDir, "locks"))
 			health := deploy.NewHTTPHealthChecker()
@@ -73,13 +75,14 @@ func newWorkerCmd(configPath *string) *cobra.Command {
 			svc.ReconcileOnStartup(ctx)
 
 			w := worker.New(worker.Config{
-				Apps:         apps,
-				PollInterval: cfg.PollInterval,
-				DataDir:      cfg.DataDir,
-				Registry:     reg,
-				Verifier:     verifier,
-				Deployer:     svc,
-				Logger:       logger,
+				Apps:           apps,
+				PollInterval:   cfg.PollInterval,
+				DataDir:        cfg.DataDir,
+				Registry:       reg,
+				Verifier:       verifier,
+				Deployer:       svc,
+				ComposeFetcher: composeFetcher,
+				Logger:         logger,
 			})
 
 			logger.Info("furnace-worker starting",

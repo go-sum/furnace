@@ -16,4 +16,5 @@ type AppConfig struct {
 	ImageVar        string        // env var name: APP_IMAGE
 	HealthURL       string        // full URL: http://myapp-web-1:8080/healthz
 	HealthTimeout   time.Duration
+	ComposeArtifact string        // optional OCI artifact ref pattern; {tag} is substituted at deploy time
 }

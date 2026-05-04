@@ -9,6 +9,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/go-sum/furnace/internal/deploy"
 	"github.com/go-sum/furnace/internal/model"
 )
 
@@ -28,41 +29,50 @@ type Deployer interface {
 	Status(ctx context.Context, appName string) (*model.Deployment, error)
 }
 
+// ComposeArtifactFetcher fetches and verifies a compose OCI artifact,
+// writing compose files to the app directory.
+type ComposeArtifactFetcher interface {
+	FetchAndVerify(ctx context.Context, artifactRef, allowedIdentity, destDir string) error
+}
+
 // Config holds all Worker dependencies.
 type Config struct {
-	Apps         map[string]model.AppConfig
-	PollInterval time.Duration
-	DataDir      string
-	Registry     RegistryClient
-	Verifier     SignatureVerifier
-	Deployer     Deployer
-	Logger       *slog.Logger
+	Apps           map[string]model.AppConfig
+	PollInterval   time.Duration
+	DataDir        string
+	Registry       RegistryClient
+	Verifier       SignatureVerifier
+	Deployer       Deployer
+	ComposeFetcher ComposeArtifactFetcher
+	Logger         *slog.Logger
 }
 
 // Worker polls GHCR for new image versions, verifies Sigstore signatures,
 // and triggers deploys via the deploy service.
 type Worker struct {
-	apps         map[string]model.AppConfig
-	pollInterval time.Duration
-	dataDir      string
-	registry     RegistryClient
-	verifier     SignatureVerifier
-	deployer     Deployer
-	logger       *slog.Logger
-	states       *stateStore
+	apps           map[string]model.AppConfig
+	pollInterval   time.Duration
+	dataDir        string
+	registry       RegistryClient
+	verifier       SignatureVerifier
+	deployer       Deployer
+	composeFetcher ComposeArtifactFetcher
+	logger         *slog.Logger
+	states         *stateStore
 }
 
 // New creates a Worker with the given configuration.
 func New(cfg Config) *Worker {
 	return &Worker{
-		apps:         cfg.Apps,
-		pollInterval: cfg.PollInterval,
-		dataDir:      cfg.DataDir,
-		registry:     cfg.Registry,
-		verifier:     cfg.Verifier,
-		deployer:     cfg.Deployer,
-		logger:       cfg.Logger,
-		states:       newStateStore(filepath.Join(cfg.DataDir, "state")),
+		apps:           cfg.Apps,
+		pollInterval:   cfg.PollInterval,
+		dataDir:        cfg.DataDir,
+		registry:       cfg.Registry,
+		verifier:       cfg.Verifier,
+		deployer:       cfg.Deployer,
+		composeFetcher: cfg.ComposeFetcher,
+		logger:         cfg.Logger,
+		states:         newStateStore(filepath.Join(cfg.DataDir, "state")),
 	}
 }
 
@@ -154,6 +164,14 @@ func (w *Worker) pollApp(ctx context.Context, app model.AppConfig) error {
 		return fmt.Errorf("signature verification: %w", err)
 	}
 	w.logger.Info("signature verified", "app", app.Name, "tag", tag)
+
+	if app.ComposeArtifact != "" && w.composeFetcher != nil {
+		artifactRef := deploy.ResolveArtifactRef(app.ComposeArtifact, tag)
+		if err := w.composeFetcher.FetchAndVerify(ctx, artifactRef, app.AllowedIdentity, app.Dir); err != nil {
+			return fmt.Errorf("fetch compose artifact: %w", err)
+		}
+		w.logger.Info("compose artifact synced", "app", app.Name, "tag", tag)
+	}
 
 	req := model.DeployRequest{
 		AppName: app.Name,

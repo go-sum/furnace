@@ -9,3 +9,4 @@ apps:
     domain: "furnace.server"
     dir: "/srv/apps/furnace-web"
     health_url: "http://furnace-web-web-1:8080/v1/health"
+    compose_artifact: "ghcr.io/go-sum/furnace:{tag}-compose"
