@@ -212,7 +212,7 @@ apps:
 Validate the config before starting:
 
 ```bash
-furnace validate
+sudo furnace validate
 ```
 
 ### 5. Generate TLS certificates (staging)
