@@ -44,7 +44,7 @@ func newWorkerCmd(configPath *string) *cobra.Command {
 
 			reg := registry.NewClient()
 
-			verifier, err := verify.New()
+			verifier, err := verify.New(filepath.Join(cfg.DataDir, "sigstore-tuf"))
 			if err != nil {
 				return fmt.Errorf("init sigstore verifier: %w", err)
 			}

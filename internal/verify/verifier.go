@@ -13,6 +13,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/sigstore/sigstore-go/pkg/root"
+	"github.com/sigstore/sigstore-go/pkg/tuf"
 	sgverify "github.com/sigstore/sigstore-go/pkg/verify"
 
 	"github.com/go-sum/furnace/internal/model"
@@ -32,9 +33,12 @@ type Verifier struct {
 }
 
 // New creates a Verifier by fetching the Sigstore public trust root from TUF.
+// cacheDir is the directory where TUF metadata is cached (e.g. /var/lib/furnace/sigstore-tuf).
 // This makes a network call to the Sigstore TUF repository on first use.
-func New() (*Verifier, error) {
-	tr, err := root.FetchTrustedRoot()
+func New(cacheDir string) (*Verifier, error) {
+	opts := tuf.DefaultOptions()
+	opts.CachePath = cacheDir
+	tr, err := root.FetchTrustedRootWithOptions(opts)
 	if err != nil {
 		return nil, fmt.Errorf("fetch sigstore trust root: %w", err)
 	}
