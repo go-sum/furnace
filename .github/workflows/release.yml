@@ -103,6 +103,8 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           build-args: VERSION=${{ github.ref_name }}
           tags: |
             ghcr.io/go-sum/furnace-web:${{ github.ref_name }}

@@ -7,7 +7,6 @@
 .plans
 .task/
 
-bin/
 tmp/
 
 *.test
