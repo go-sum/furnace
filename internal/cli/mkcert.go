@@ -100,7 +100,9 @@ func runMkcertGenerate(configPath string, args []string) error {
 		sort.Strings(names)
 		for _, name := range names {
 			appCfg, _ := cfg.AppConfig(name)
-			domains = append(domains, appCfg.Domain)
+			if appCfg.TLS {
+				domains = append(domains, appCfg.Domain)
+			}
 		}
 	} else {
 		for _, name := range args {
@@ -108,8 +110,15 @@ func runMkcertGenerate(configPath string, args []string) error {
 			if !ok {
 				return fmt.Errorf("app %q not found in config", name)
 			}
-			domains = append(domains, appCfg.Domain)
+			if appCfg.TLS {
+				domains = append(domains, appCfg.Domain)
+			}
 		}
+	}
+
+	if len(domains) == 0 {
+		fmt.Println("no certs created")
+		return nil
 	}
 
 	certPEM, keyPEM, err := certgen.GenerateServerCert(ca, domains)

@@ -6,7 +6,7 @@ import (
 	"github.com/go-sum/furnace/internal/model"
 )
 
-// Deployer is the subset of deploy.Service used by HTTP handlers.
+// Deployer provides deployment status reads for HTTP handlers.
 type Deployer interface {
 	Status(ctx context.Context, appName string) (*model.Deployment, error)
 }

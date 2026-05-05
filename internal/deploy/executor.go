@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 )
 
@@ -11,10 +12,16 @@ type CommandExecutor interface {
 	Exec(ctx context.Context, dir string, args []string) ([]byte, error)
 }
 
-type DockerExecutor struct{}
+type DockerExecutor struct {
+	extraEnv []string
+}
 
 func NewDockerExecutor() *DockerExecutor {
 	return &DockerExecutor{}
+}
+
+func NewDockerExecutorWithEnv(extraEnv []string) *DockerExecutor {
+	return &DockerExecutor{extraEnv: append([]string(nil), extraEnv...)}
 }
 
 func (e *DockerExecutor) Exec(ctx context.Context, dir string, args []string) ([]byte, error) {
@@ -30,5 +37,8 @@ func (e *DockerExecutor) Exec(ctx context.Context, dir string, args []string) ([
 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = dir
+	if len(e.extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), e.extraEnv...)
+	}
 	return cmd.CombinedOutput()
 }

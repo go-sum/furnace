@@ -8,9 +8,12 @@ Requires=docker.service
 Type=simple
 User=furnace
 Environment=HOME=/var/lib/furnace
-ExecStart=/usr/local/bin/furnace worker
+ExecStart=/usr/local/bin/furnace worker run
 Restart=on-failure
 RestartSec=5s
+{{- if .HasCredential}}
+LoadCredentialEncrypted=registry-token:/etc/furnace/registry-token.cred
+{{- end}}
 
 # Structured JSON logs go to the journal
 StandardOutput=journal

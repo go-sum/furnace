@@ -17,9 +17,13 @@ type Client struct {
 	keychain authn.Keychain
 }
 
-// NewClient returns a Client that authenticates via Docker credential helpers.
-func NewClient() *Client {
-	return &Client{keychain: authn.DefaultKeychain}
+// NewClient returns a Client that authenticates via the provided keychain.
+// If keychain is nil, authn.DefaultKeychain is used.
+func NewClient(keychain authn.Keychain) *Client {
+	if keychain == nil {
+		keychain = authn.DefaultKeychain
+	}
+	return &Client{keychain: keychain}
 }
 
 func (c *Client) craneOpts(ctx context.Context) []crane.Option {

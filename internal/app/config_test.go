@@ -15,6 +15,7 @@ apps:
     image: "ghcr.io/org/myapp"
     tag_pattern: "v*"
     allowed_identity: "org/myapp"
+    artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "myapp.example.com"
     health_url: "http://` + name + `-web-1:8080/healthz"
 `
@@ -43,44 +44,14 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if appCfg.ImageVar != "APP_IMAGE" {
 		t.Fatalf("expected default image_var APP_IMAGE, got %q", appCfg.ImageVar)
 	}
-	if len(appCfg.ComposeFiles) != 2 || appCfg.ComposeFiles[0] != "docker-compose.data.yml" {
-		t.Fatalf("unexpected default compose files: %v", appCfg.ComposeFiles)
+	if appCfg.Artifact != "ghcr.io/org/myapp:{tag}-compose" {
+		t.Fatalf("expected artifact ghcr.io/org/myapp:{tag}-compose, got %q", appCfg.Artifact)
 	}
 	if appCfg.EnvFile != ".deploy.env" {
 		t.Fatalf("expected default env_file .deploy.env, got %q", appCfg.EnvFile)
 	}
 }
 
-func TestLoadConfig_NormalizesRelativePaths(t *testing.T) {
-	path := writeConfig(t, `
-data_dir: "/var/lib/furnace"
-apps:
-  myapp:
-    image: "ghcr.io/org/myapp"
-    tag_pattern: "v*"
-    allowed_identity: "org/myapp"
-    domain: "myapp.example.com"
-    compose_files:
-      - "nested/../docker-compose.data.yml"
-      - "docker-compose.yml"
-    env_file: "./configs/../.deploy.env"
-    health_url: "http://myapp-web-1:8080/healthz"
-`)
-	cfg, err := LoadConfig(path)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	appCfg, ok := cfg.AppConfig("myapp")
-	if !ok {
-		t.Fatal("expected app config")
-	}
-	if len(appCfg.ComposeFiles) != 2 || appCfg.ComposeFiles[0] != "docker-compose.data.yml" {
-		t.Fatalf("expected normalized compose files, got %v", appCfg.ComposeFiles)
-	}
-	if appCfg.EnvFile != ".deploy.env" {
-		t.Fatalf("expected normalized env file, got %q", appCfg.EnvFile)
-	}
-}
 
 func TestLoadConfig_RejectsTraversingEnvFile(t *testing.T) {
 	path := writeConfig(t, `
@@ -90,6 +61,7 @@ apps:
     image: "ghcr.io/org/myapp"
     tag_pattern: "v*"
     allowed_identity: "org/myapp"
+    artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "myapp.example.com"
     env_file: "../escape.env"
     health_url: "http://myapp-web-1:8080/healthz"
@@ -104,28 +76,6 @@ apps:
 	}
 }
 
-func TestLoadConfig_RejectsAbsoluteComposeFile(t *testing.T) {
-	path := writeConfig(t, `
-data_dir: "/var/lib/furnace"
-apps:
-  myapp:
-    image: "ghcr.io/org/myapp"
-    tag_pattern: "v*"
-    allowed_identity: "org/myapp"
-    domain: "myapp.example.com"
-    compose_files:
-      - "/tmp/compose.yml"
-    health_url: "http://myapp-web-1:8080/healthz"
-`)
-	_, err := LoadConfig(path)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	want := `app "myapp": compose_files[0]: path must be relative`
-	if err.Error() != want {
-		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
-	}
-}
 
 func TestLoadConfig_RejectsInvalidHealthURLScheme(t *testing.T) {
 	path := writeConfig(t, `
@@ -135,6 +85,7 @@ apps:
     image: "ghcr.io/org/myapp"
     tag_pattern: "v*"
     allowed_identity: "org/myapp"
+    artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "myapp.example.com"
     health_url: "ftp://myapp-web-1/healthz"
 `)
@@ -156,6 +107,7 @@ func TestLoadConfig_RejectsInvalidAppName(t *testing.T) {
 		{"uppercase", "MyApp"},
 		{"spaces", "my app"},
 		{"starts with dash", "-myapp"},
+		{"underscore", "my_app"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -169,7 +121,7 @@ func TestLoadConfig_RejectsInvalidAppName(t *testing.T) {
 }
 
 func TestLoadConfig_AcceptsValidAppNames(t *testing.T) {
-	for _, name := range []string{"myapp", "my-app", "my_app", "app1", "a"} {
+	for _, name := range []string{"myapp", "my-app", "app1", "a"} {
 		t.Run(name, func(t *testing.T) {
 			path := writeConfig(t, validAppYAML(name))
 			_, err := LoadConfig(path)
@@ -188,6 +140,7 @@ apps:
     image: "ghcr.io/org/myapp"
     tag_pattern: "v*"
     allowed_identity: "notaslug"
+    artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "myapp.example.com"
     health_url: "http://myapp-web-1:8080/healthz"
 `)
@@ -209,6 +162,7 @@ apps:
     image: "ghcr.io/org/myapp"
     tag_pattern: "v*"
     allowed_identity: "org/myapp"
+    artifact: "ghcr.io/org/myapp:{tag}-compose"
     health_url: "http://myapp-web-1:8080/healthz"
 `)
 	_, err := LoadConfig(path)
@@ -245,6 +199,7 @@ apps:
     image: "ghcr.io/org/myapp"
     tag_pattern: "v*"
     allowed_identity: "org/myapp"
+    artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "`+domain+`"
     health_url: "http://myapp-web-1:8080/healthz"
 `)
@@ -284,6 +239,187 @@ apps:
 				t.Fatalf("expected domain %q to be rejected", tc.domain)
 			}
 		})
+	}
+}
+
+func TestLoadConfig_ValidTrustedProxies(t *testing.T) {
+	path := writeConfig(t, `
+data_dir: "/var/lib/furnace"
+trusted_proxies:
+  - "172.16.0.0/12"
+  - "10.0.0.0/8"
+apps: {}
+`)
+	_, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("expected valid trusted_proxies to pass, got: %v", err)
+	}
+}
+
+func TestLoadConfig_RejectsInvalidTrustedProxies(t *testing.T) {
+	path := writeConfig(t, `
+data_dir: "/var/lib/furnace"
+trusted_proxies:
+  - "not-a-cidr"
+apps: {}
+`)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for invalid CIDR")
+	}
+	want := `invalid trusted_proxies entry "not-a-cidr": invalid CIDR address: not-a-cidr`
+	if err.Error() != want {
+		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
+	}
+}
+
+func TestLoadConfig_TLSDefaultsFalse(t *testing.T) {
+	path := writeConfig(t, validAppYAML("myapp"))
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	appCfg, ok := cfg.AppConfig("myapp")
+	if !ok {
+		t.Fatal("expected app config")
+	}
+	if appCfg.TLS {
+		t.Fatal("expected TLS to default to false when unset")
+	}
+}
+
+func TestLoadConfig_TLSTrue(t *testing.T) {
+	path := writeConfig(t, `
+data_dir: "/var/lib/furnace"
+apps:
+  myapp:
+    image: "ghcr.io/org/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "org/myapp"
+    artifact: "ghcr.io/org/myapp:{tag}-compose"
+    domain: "myapp.example.com"
+    health_url: "http://myapp-web-1:8080/healthz"
+    tls: true
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	appCfg, ok := cfg.AppConfig("myapp")
+	if !ok {
+		t.Fatal("expected app config")
+	}
+	if !appCfg.TLS {
+		t.Fatal("expected TLS to be true")
+	}
+}
+
+func TestLoadConfig_RequiresArtifact(t *testing.T) {
+	path := writeConfig(t, `
+data_dir: "/var/lib/furnace"
+apps:
+  myapp:
+    image: "ghcr.io/org/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "org/myapp"
+    domain: "myapp.example.com"
+    health_url: "http://myapp-web-1:8080/healthz"
+`)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for missing artifact")
+	}
+	want := `app "myapp": artifact is required`
+	if err.Error() != want {
+		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
+	}
+}
+
+func TestLoadConfig_RejectsComposeFiles(t *testing.T) {
+	path := writeConfig(t, `
+data_dir: "/var/lib/furnace"
+apps:
+  myapp:
+    image: "ghcr.io/org/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "org/myapp"
+    artifact: "ghcr.io/org/myapp:{tag}-compose"
+    domain: "myapp.example.com"
+    health_url: "http://myapp-web-1:8080/healthz"
+    compose_files:
+      - "docker-compose.yml"
+`)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for compose_files")
+	}
+	want := `app "myapp": compose_files is no longer supported; use artifact instead`
+	if err.Error() != want {
+		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
+	}
+}
+
+func TestLoadConfig_KeepReleasesDefault(t *testing.T) {
+	path := writeConfig(t, validAppYAML("myapp"))
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	appCfg, ok := cfg.AppConfig("myapp")
+	if !ok {
+		t.Fatal("expected app config")
+	}
+	if appCfg.KeepReleases != 5 {
+		t.Fatalf("expected default keep_releases 5, got %d", appCfg.KeepReleases)
+	}
+}
+
+func TestLoadConfig_KeepReleasesExplicit(t *testing.T) {
+	path := writeConfig(t, `
+data_dir: "/var/lib/furnace"
+apps:
+  myapp:
+    image: "ghcr.io/org/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "org/myapp"
+    artifact: "ghcr.io/org/myapp:{tag}-compose"
+    domain: "myapp.example.com"
+    health_url: "http://myapp-web-1:8080/healthz"
+    keep_releases: 10
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	appCfg, ok := cfg.AppConfig("myapp")
+	if !ok {
+		t.Fatal("expected app config")
+	}
+	if appCfg.KeepReleases != 10 {
+		t.Fatalf("expected keep_releases 10, got %d", appCfg.KeepReleases)
+	}
+}
+
+func TestLoadConfig_KeepReleasesRejectsZero(t *testing.T) {
+	path := writeConfig(t, `
+data_dir: "/var/lib/furnace"
+apps:
+  myapp:
+    image: "ghcr.io/org/myapp"
+    tag_pattern: "v*"
+    allowed_identity: "org/myapp"
+    artifact: "ghcr.io/org/myapp:{tag}-compose"
+    domain: "myapp.example.com"
+    health_url: "http://myapp-web-1:8080/healthz"
+    keep_releases: -1
+`)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for keep_releases < 1")
+	}
+	want := `app "myapp": keep_releases must be at least 1`
+	if err.Error() != want {
+		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
 	}
 }
 

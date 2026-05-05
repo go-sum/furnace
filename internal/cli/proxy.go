@@ -18,10 +18,10 @@ const caddyfileTmpl = `{
 	auto_https off
 	admin off
 }
-{{range .}}
+{{range .Apps}}
 {{.Domain}} {
-	tls /certs/local.pem /certs/local-key.pem
-	reverse_proxy {{.Name}}-web-1:{{.Port}}
+	{{if .TLS}}tls /certs/local.pem /certs/local-key.pem
+	{{end}}reverse_proxy {{.Name}}-web-1:{{.Port}}
 }
 {{end}}`
 
@@ -34,6 +34,8 @@ func newProxyCmd(configPath *string) *cobra.Command {
 		newProxyInitCmd(configPath),
 		newProxyUpCmd(),
 		newProxyStatusCmd(),
+		newProxyDownCmd(),
+		newProxyLogsCmd(),
 	)
 	return cmd
 }
@@ -48,8 +50,6 @@ func newProxyInitCmd(configPath *string) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}
-
-			const proxyDir = "/srv/furnace/proxy"
 
 			composePath := proxyDir + "/compose.yml"
 			if err := os.WriteFile(composePath, deploy.ProxyComposeYML, 0644); err != nil {
@@ -105,6 +105,46 @@ type caddyApp struct {
 	Name   string
 	Domain string
 	Port   int
+	TLS    bool
+}
+
+type caddyfileData struct {
+	Apps []caddyApp
+}
+
+func newProxyDownCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "down",
+		Short: "Stop the Caddy reverse proxy",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			c := exec.Command("docker", "compose", "-f", "/srv/furnace/proxy/compose.yml", "down")
+			c.Stdout = os.Stdout
+			c.Stderr = os.Stderr
+			return c.Run()
+		},
+	}
+}
+
+func newProxyLogsCmd() *cobra.Command {
+	var follow bool
+	cmd := &cobra.Command{
+		Use:   "logs",
+		Short: "Show Caddy reverse proxy logs",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			args := []string{"compose", "-f", "/srv/furnace/proxy/compose.yml", "logs"}
+			if follow {
+				args = append(args, "-f")
+			}
+			c := exec.Command("docker", args...)
+			c.Stdout = os.Stdout
+			c.Stderr = os.Stderr
+			return c.Run()
+		},
+	}
+	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output")
+	return cmd
 }
 
 func generateCaddyfile(cfg *app.Config) ([]byte, error) {
@@ -121,6 +161,7 @@ func generateCaddyfile(cfg *app.Config) ([]byte, error) {
 			Name:   name,
 			Domain: appCfg.Domain,
 			Port:   appCfg.Port,
+			TLS:    appCfg.TLS,
 		})
 	}
 
@@ -129,7 +170,7 @@ func generateCaddyfile(cfg *app.Config) ([]byte, error) {
 		return nil, err
 	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, apps); err != nil {
+	if err := tmpl.Execute(&buf, caddyfileData{Apps: apps}); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil

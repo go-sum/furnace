@@ -34,8 +34,12 @@ type Verifier struct {
 
 // New creates a Verifier by fetching the Sigstore public trust root from TUF.
 // cacheDir is the directory where TUF metadata is cached (e.g. /var/lib/furnace/sigstore-tuf).
+// If keychain is nil, authn.DefaultKeychain is used.
 // This makes a network call to the Sigstore TUF repository on first use.
-func New(cacheDir string) (*Verifier, error) {
+func New(cacheDir string, keychain authn.Keychain) (*Verifier, error) {
+	if keychain == nil {
+		keychain = authn.DefaultKeychain
+	}
 	opts := tuf.DefaultOptions()
 	opts.CachePath = cacheDir
 	tr, err := root.FetchTrustedRootWithOptions(opts)
@@ -44,7 +48,7 @@ func New(cacheDir string) (*Verifier, error) {
 	}
 	return &Verifier{
 		trustedRoot: tr,
-		keychain:    authn.DefaultKeychain,
+		keychain:    keychain,
 	}, nil
 }
 

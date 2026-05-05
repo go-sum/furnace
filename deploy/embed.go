@@ -6,4 +6,4 @@ import _ "embed"
 var ProxyComposeYML []byte
 
 //go:embed furnace-worker.service
-var WorkerServiceUnit []byte
+var WorkerServiceTemplate string

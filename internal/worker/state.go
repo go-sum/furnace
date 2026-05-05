@@ -12,9 +12,10 @@ import (
 
 // AppState records the last successfully deployed version of an app.
 type AppState struct {
-	Tag        string    `json:"tag"`
-	Digest     string    `json:"digest"`
-	DeployedAt time.Time `json:"deployed_at"`
+	Tag            string    `json:"tag"`
+	Digest         string    `json:"digest"`
+	ArtifactDigest string    `json:"artifact_digest,omitempty"`
+	DeployedAt     time.Time `json:"deployed_at"`
 }
 
 type stateStore struct {

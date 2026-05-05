@@ -1,12 +1,27 @@
 data_dir: "/var/lib/furnace"
 poll_interval: "60s"
 
+# CIDR ranges of trusted reverse proxies for rate-limit client IP extraction.
+# Each entry must be valid CIDR notation.
+# trusted_proxies:
+#   - "172.16.0.0/12"
+
 apps:
   furnace-web:
-    image: "ghcr.io/go-sum/furnace"
+    image: "ghcr.io/go-sum/furnace-web"
     tag_pattern: "v*"
     allowed_identity: "go-sum/furnace"
+    artifact: "ghcr.io/go-sum/furnace-web:{tag}-compose"
     domain: "furnace.server"
     dir: "/srv/apps/furnace-web"
     health_url: "http://furnace-web-web-1:8080/v1/health"
-    compose_artifact: "ghcr.io/go-sum/furnace:{tag}-compose"
+
+  # myapp:
+  #   image: "ghcr.io/yourorg/myapp"
+  #   tag_pattern: "v*"
+  #   allowed_identity: "yourorg/myapp"
+  #   artifact: "ghcr.io/yourorg/myapp:{tag}-compose"
+  #   domain: "myapp.example.com"
+  #   health_url: "http://myapp-web-1:8080/healthz"
+  #   # tls: true
+  #   # keep_releases: 5

@@ -48,6 +48,16 @@ func runReset() error {
 	_ = systemctl("daemon-reload")
 	fmt.Println("reloaded systemd daemon")
 
+	if err := os.Remove("/etc/furnace/registry-token.cred"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Printf("warn: remove registry credential: %v\n", err)
+	}
+	fmt.Println("removed  /etc/furnace/registry-token.cred")
+
+	if err := os.RemoveAll("/var/lib/furnace/.docker"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Printf("warn: remove docker config: %v\n", err)
+	}
+	fmt.Println("removed  /var/lib/furnace/.docker")
+
 	_ = exec.Command("docker", "compose", "-f", "/srv/furnace/proxy/compose.yml", "down").Run()
 	fmt.Println("stopped  proxy")
 

@@ -43,7 +43,7 @@ func (f *fakeHealthChecker) Check(_ context.Context, _ string, _ time.Duration) 
 	return f.err
 }
 
-func newTestService(t *testing.T, executor CommandExecutor, health HealthChecker) (*Service, string) {
+func newTestService(t *testing.T, executor CommandExecutor, health HealthChecker) (*Service, string, *ReleaseManager) {
 	t.Helper()
 	dir := t.TempDir()
 	appDir := filepath.Join(dir, "apps", "testapp")
@@ -52,6 +52,7 @@ func newTestService(t *testing.T, executor CommandExecutor, health HealthChecker
 	store := storage.NewFileDeploymentStore(filepath.Join(dir, "deployments"), slog.Default())
 	auditLogger, _ := audit.NewFileLogger(filepath.Join(dir, "audit"))
 	lock := NewFileLock(filepath.Join(dir, "locks"))
+	rm := NewReleaseManager(slog.Default())
 
 	apps := map[string]model.AppConfig{
 		"testapp": {
@@ -61,11 +62,12 @@ func newTestService(t *testing.T, executor CommandExecutor, health HealthChecker
 			AllowedIdentity: "org/myapp",
 			Dir:             appDir,
 			Port:            8080,
-			ComposeFiles:    []string{"docker-compose.data.yml", "docker-compose.yml"},
+			Artifact:        "ghcr.io/org/myapp:{tag}-compose",
 			EnvFile:         ".deploy.env",
 			ImageVar:        "APP_IMAGE",
 			HealthURL:       "http://testapp-web-1:8080/healthz",
 			HealthTimeout:   5 * time.Second,
+			KeepReleases:    5,
 		},
 	}
 
@@ -78,17 +80,34 @@ func newTestService(t *testing.T, executor CommandExecutor, health HealthChecker
 		Audit:    auditLogger,
 		DataDir:  dir,
 		Logger:   slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Releases: rm,
 	})
 
-	return svc, appDir
+	return svc, appDir, rm
 }
 
 func validRequest() model.DeployRequest {
 	return model.DeployRequest{
-		AppName: "testapp",
-		Image:   "ghcr.io/org/myapp:v1.0.0",
-		Tag:     "v1.0.0",
-		Digest:  "sha256:abc123",
+		AppName:        "testapp",
+		Image:          "ghcr.io/org/myapp:v1.0.0",
+		Tag:            "v1.0.0",
+		Digest:         "sha256:abc123",
+		ArtifactDigest: "sha256:testart123",
+	}
+}
+
+// createTestRelease creates a release directory for the given digest in the app dir.
+func createTestRelease(t *testing.T, rm *ReleaseManager, appDir, digest string) {
+	t.Helper()
+	stagingDir, err := rm.CreateStagingDir(appDir)
+	if err != nil {
+		t.Fatalf("CreateStagingDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stagingDir, "docker-compose.yml"), []byte("services: {}"), 0644); err != nil {
+		t.Fatalf("write compose.yml: %v", err)
+	}
+	if err := rm.CommitStaging(appDir, stagingDir, digest); err != nil {
+		t.Fatalf("CommitStaging: %v", err)
 	}
 }
 
@@ -118,7 +137,8 @@ func TestService_Start_HappyPath(t *testing.T) {
 			{output: []byte("started")},
 		},
 	}
-	svc, _ := newTestService(t, exec, &fakeHealthChecker{})
+	svc, appDir, rm := newTestService(t, exec, &fakeHealthChecker{})
+	createTestRelease(t, rm, appDir, "sha256:testart123")
 
 	d, err := svc.Start(context.Background(), validRequest())
 	if err != nil {
@@ -141,7 +161,7 @@ func TestService_Start_HappyPath(t *testing.T) {
 }
 
 func TestService_Start_UnknownApp(t *testing.T) {
-	svc, _ := newTestService(t, &fakeExecutor{}, &fakeHealthChecker{})
+	svc, _, _ := newTestService(t, &fakeExecutor{}, &fakeHealthChecker{})
 	req := validRequest()
 	req.AppName = "nonexistent"
 
@@ -153,7 +173,8 @@ func TestService_Start_UnknownApp(t *testing.T) {
 
 func TestService_Start_PullFails(t *testing.T) {
 	exec := &fakeExecutor{results: []fakeExecResult{{err: errors.New("network timeout")}}}
-	svc, _ := newTestService(t, exec, &fakeHealthChecker{})
+	svc, appDir, rm := newTestService(t, exec, &fakeHealthChecker{})
+	createTestRelease(t, rm, appDir, "sha256:testart123")
 
 	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("start should not fail: %v", err)
@@ -173,7 +194,8 @@ func TestService_Start_ComposeUpFails(t *testing.T) {
 		{output: []byte("pulled")},
 		{err: errors.New("container crash")},
 	}}
-	svc, _ := newTestService(t, exec, &fakeHealthChecker{})
+	svc, appDir, rm := newTestService(t, exec, &fakeHealthChecker{})
+	createTestRelease(t, rm, appDir, "sha256:testart123")
 
 	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("start should not fail: %v", err)
@@ -193,7 +215,8 @@ func TestService_Start_HealthCheckFails(t *testing.T) {
 		{output: []byte("pulled")},
 		{output: []byte("started")},
 	}}
-	svc, _ := newTestService(t, exec, &fakeHealthChecker{err: model.ErrHealthCheckFailed})
+	svc, appDir, rm := newTestService(t, exec, &fakeHealthChecker{err: model.ErrHealthCheckFailed})
+	createTestRelease(t, rm, appDir, "sha256:testart123")
 
 	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("start should not fail: %v", err)
@@ -210,7 +233,8 @@ func TestService_Start_HealthCheckFails(t *testing.T) {
 
 func TestService_Start_ConcurrentReject(t *testing.T) {
 	blockExec := &blockingExecutor{done: make(chan struct{})}
-	svc, _ := newTestService(t, blockExec, &fakeHealthChecker{})
+	svc, appDir, rm := newTestService(t, blockExec, &fakeHealthChecker{})
+	createTestRelease(t, rm, appDir, "sha256:testart123")
 
 	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("first start: %v", err)
@@ -240,7 +264,7 @@ func (b *blockingExecutor) Exec(ctx context.Context, _ string, _ []string) ([]by
 }
 
 func TestService_Status_UnknownApp(t *testing.T) {
-	svc, _ := newTestService(t, &fakeExecutor{}, &fakeHealthChecker{})
+	svc, _, _ := newTestService(t, &fakeExecutor{}, &fakeHealthChecker{})
 	_, err := svc.Status(context.Background(), "nonexistent")
 	if !errors.Is(err, model.ErrAppNotFound) {
 		t.Fatalf("expected ErrAppNotFound, got: %v", err)
@@ -252,7 +276,8 @@ func TestService_Start_WritesEnvFile(t *testing.T) {
 		{output: []byte("pulled")},
 		{output: []byte("started")},
 	}}
-	svc, appDir := newTestService(t, exec, &fakeHealthChecker{})
+	svc, appDir, rm := newTestService(t, exec, &fakeHealthChecker{})
+	createTestRelease(t, rm, appDir, "sha256:testart123")
 
 	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("start: %v", err)
@@ -270,8 +295,11 @@ func TestService_Start_WritesEnvFile(t *testing.T) {
 }
 
 func TestService_Start_RestoresEnvAfterPullFailure(t *testing.T) {
-	exec := &fakeExecutor{results: []fakeExecResult{{err: errors.New("network timeout")}}}
-	svc, appDir := newTestService(t, exec, &fakeHealthChecker{})
+	exec := &fakeExecutor{results: []fakeExecResult{
+		{err: errors.New("network timeout")},
+	}}
+	svc, appDir, rm := newTestService(t, exec, &fakeHealthChecker{})
+	createTestRelease(t, rm, appDir, "sha256:testart123")
 
 	envPath := filepath.Join(appDir, ".deploy.env")
 	previous := "APP_IMAGE=ghcr.io/org/myapp:v0.9.0\n"
@@ -292,11 +320,24 @@ func TestService_Start_RestoresEnvAfterPullFailure(t *testing.T) {
 }
 
 func TestService_Start_RestoresEnvAfterHealthFailure(t *testing.T) {
+	// Set up previous release and activate it.
+	// The new deploy will have a different digest, with its own release.
 	exec := &fakeExecutor{results: []fakeExecResult{
 		{output: []byte("pulled")},
 		{output: []byte("started")},
+		{output: []byte("rolled back")},
 	}}
-	svc, appDir := newTestService(t, exec, &fakeHealthChecker{err: model.ErrHealthCheckFailed})
+	svc, appDir, rm := newTestService(t, exec, &fakeHealthChecker{err: model.ErrHealthCheckFailed})
+
+	// Create and activate a previous release so prevComposeFiles is populated.
+	prevDigest := "sha256:prevart"
+	createTestRelease(t, rm, appDir, prevDigest)
+	if _, err := rm.Activate(appDir, prevDigest); err != nil {
+		t.Fatalf("activate prev release: %v", err)
+	}
+
+	// Create current release.
+	createTestRelease(t, rm, appDir, "sha256:testart123")
 
 	envPath := filepath.Join(appDir, ".deploy.env")
 	previous := "APP_IMAGE=ghcr.io/org/myapp:v0.9.0\n"
@@ -314,11 +355,69 @@ func TestService_Start_RestoresEnvAfterHealthFailure(t *testing.T) {
 	if string(data) != previous {
 		t.Fatalf("env not restored:\ngot  %q\nwant %q", string(data), previous)
 	}
+
+	// Should have 3 exec calls: pull, up, rollback-up.
+	if len(exec.calls) < 3 {
+		t.Fatalf("expected at least 3 exec calls, got %d", len(exec.calls))
+	}
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestService_Start_RollbackComposeUpCalledAfterHealthFailure(t *testing.T) {
+	exec := &fakeExecutor{results: []fakeExecResult{
+		{output: []byte("pulled")},
+		{output: []byte("started")},
+		{output: []byte("rolled back")},
+	}}
+	svc, appDir, rm := newTestService(t, exec, &fakeHealthChecker{err: model.ErrHealthCheckFailed})
+
+	// Create and activate a previous release.
+	prevDigest := "sha256:prevart"
+	createTestRelease(t, rm, appDir, prevDigest)
+	if _, err := rm.Activate(appDir, prevDigest); err != nil {
+		t.Fatalf("activate prev release: %v", err)
+	}
+
+	// Create current release.
+	createTestRelease(t, rm, appDir, "sha256:testart123")
+
+	envPath := filepath.Join(appDir, ".deploy.env")
+	os.WriteFile(envPath, []byte("APP_IMAGE=ghcr.io/org/myapp:v0.9.0\n"), 0640)
+
+	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
+		t.Fatalf("start should not fail: %v", err)
+	}
+	waitForTerminal(t, svc, "testapp", 5*time.Second)
+
+	if len(exec.calls) < 3 {
+		t.Fatalf("expected at least 3 exec calls, got %d", len(exec.calls))
+	}
+
+	// The 3rd call should be a compose up with the previous release's files.
+	prevReleasePath := rm.ReleasePath(appDir, prevDigest)
+	prevComposeFiles := []string{filepath.Join(prevReleasePath, "docker-compose.yml")}
+	app := svc.apps["testapp"]
+	wantRollback := ComposeUpArgs(app, prevComposeFiles)
+	if !stringSlicesEqual(exec.calls[2], wantRollback) {
+		t.Fatalf("3rd exec call (rollback compose up):\ngot  %v\nwant %v", exec.calls[2], wantRollback)
+	}
 }
 
 func TestService_Start_RemovesEnvWhenNoPreviousFileExists(t *testing.T) {
 	exec := &fakeExecutor{results: []fakeExecResult{{err: errors.New("network timeout")}}}
-	svc, appDir := newTestService(t, exec, &fakeHealthChecker{})
+	svc, appDir, rm := newTestService(t, exec, &fakeHealthChecker{})
+	createTestRelease(t, rm, appDir, "sha256:testart123")
 
 	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("start should not fail: %v", err)
@@ -332,7 +431,7 @@ func TestService_Start_RemovesEnvWhenNoPreviousFileExists(t *testing.T) {
 }
 
 func TestService_Start_ImageWithInvalidChars(t *testing.T) {
-	svc, _ := newTestService(t, &fakeExecutor{}, &fakeHealthChecker{})
+	svc, _, _ := newTestService(t, &fakeExecutor{}, &fakeHealthChecker{})
 	for _, img := range []string{
 		"ghcr.io/org/myapp:v1\nEVIL=yes",
 		"ghcr.io/org/myapp:v1\rEVIL=yes",
@@ -349,7 +448,7 @@ func TestService_Start_ImageWithInvalidChars(t *testing.T) {
 }
 
 func TestService_ReconcileOnStartup(t *testing.T) {
-	svc, _ := newTestService(t, &fakeExecutor{}, &fakeHealthChecker{})
+	svc, _, _ := newTestService(t, &fakeExecutor{}, &fakeHealthChecker{})
 
 	stale := &model.Deployment{
 		ID:        "STALE01",
@@ -377,7 +476,8 @@ func TestService_ReconcileOnStartup(t *testing.T) {
 
 func TestService_Shutdown_CancelsActiveDeployment(t *testing.T) {
 	blockExec := &blockingExecutor{done: make(chan struct{})}
-	svc, _ := newTestService(t, blockExec, &fakeHealthChecker{})
+	svc, appDir, rm := newTestService(t, blockExec, &fakeHealthChecker{})
+	createTestRelease(t, rm, appDir, "sha256:testart123")
 
 	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
 		t.Fatalf("start: %v", err)
@@ -396,6 +496,63 @@ func TestService_Shutdown_CancelsActiveDeployment(t *testing.T) {
 	}
 }
 
+func TestFormatFailure(t *testing.T) {
+	cases := []struct {
+		step          string
+		err           error
+		rollbackErr   error
+		rollbackUpErr error
+		want          string
+	}{
+		{"step", errors.New("x"), nil, nil, "step: x"},
+		{"step", errors.New("x"), errors.New("re"), nil, "step: x; restore env: re"},
+		{"step", errors.New("x"), nil, errors.New("rb"), "step: x; rollback compose up: rb"},
+		{"step", errors.New("x"), errors.New("re"), errors.New("rb"), "step: x; restore env: re; rollback compose up: rb"},
+	}
+	for _, tc := range cases {
+		got := formatFailure(tc.step, tc.err, tc.rollbackErr, tc.rollbackUpErr)
+		if got != tc.want {
+			t.Errorf("formatFailure(%q, %v, %v, %v) = %q, want %q", tc.step, tc.err, tc.rollbackErr, tc.rollbackUpErr, got, tc.want)
+		}
+	}
+}
+
+func TestService_Start_RollbackComposeUpFailureRecordedInError(t *testing.T) {
+	exec := &fakeExecutor{results: []fakeExecResult{
+		{output: []byte("pulled")},            // compose pull — OK
+		{output: []byte("started")},           // compose up — OK
+		{err: errors.New("rollback exploded")}, // rollback compose up — FAILS
+	}}
+	svc, appDir, rm := newTestService(t, exec, &fakeHealthChecker{err: model.ErrHealthCheckFailed})
+
+	// Create and activate a previous release so rollback compose up is triggered.
+	prevDigest := "sha256:prevart"
+	createTestRelease(t, rm, appDir, prevDigest)
+	if _, err := rm.Activate(appDir, prevDigest); err != nil {
+		t.Fatalf("activate prev release: %v", err)
+	}
+
+	// Create current release.
+	createTestRelease(t, rm, appDir, "sha256:testart123")
+
+	// Pre-place env so envState.Existed == true → rollback compose up is triggered.
+	envPath := filepath.Join(appDir, ".deploy.env")
+	os.WriteFile(envPath, []byte("APP_IMAGE=ghcr.io/org/myapp:v0.9.0\n"), 0640)
+
+	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	d := waitForTerminal(t, svc, "testapp", 5*time.Second)
+
+	if d.Status != model.StatusFailed {
+		t.Fatalf("expected failed, got %s", d.Status)
+	}
+	want := "health check: health check failed; rollback compose up: rollback exploded"
+	if d.Error != want {
+		t.Fatalf("error:\ngot  %q\nwant %q", d.Error, want)
+	}
+}
+
 type panicExecutor struct{}
 
 func (p *panicExecutor) Exec(_ context.Context, _ string, _ []string) ([]byte, error) {
@@ -403,7 +560,8 @@ func (p *panicExecutor) Exec(_ context.Context, _ string, _ []string) ([]byte, e
 }
 
 func TestService_Execute_PanicRecovery(t *testing.T) {
-	svc, _ := newTestService(t, &panicExecutor{}, &fakeHealthChecker{})
+	svc, appDir, rm := newTestService(t, &panicExecutor{}, &fakeHealthChecker{})
+	createTestRelease(t, rm, appDir, "sha256:testart123")
 
 	d, err := svc.Start(context.Background(), validRequest())
 	if err != nil {
@@ -419,3 +577,82 @@ func TestService_Execute_PanicRecovery(t *testing.T) {
 	}
 }
 
+func TestService_Start_HappyPath_ActivatesAfterHealthCheck(t *testing.T) {
+	exec := &fakeExecutor{results: []fakeExecResult{
+		{output: []byte("pulled")},
+		{output: []byte("started")},
+	}}
+	svc, appDir, rm := newTestService(t, exec, &fakeHealthChecker{})
+	createTestRelease(t, rm, appDir, "sha256:testart123")
+
+	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitForTerminal(t, svc, "testapp", 5*time.Second)
+
+	active, err := rm.ActiveReleasePath(appDir)
+	if err != nil {
+		t.Fatalf("ActiveReleasePath: %v", err)
+	}
+	want := rm.ReleasePath(appDir, "sha256:testart123")
+	if active != want {
+		t.Fatalf("current symlink:\ngot  %s\nwant %s", active, want)
+	}
+}
+
+func TestService_Start_PullFails_SymlinkNeverSwitched(t *testing.T) {
+	exec := &fakeExecutor{results: []fakeExecResult{{err: errors.New("network timeout")}}}
+	svc, appDir, rm := newTestService(t, exec, &fakeHealthChecker{})
+
+	prevDigest := "sha256:prevart"
+	createTestRelease(t, rm, appDir, prevDigest)
+	if _, err := rm.Activate(appDir, prevDigest); err != nil {
+		t.Fatalf("activate prev release: %v", err)
+	}
+	createTestRelease(t, rm, appDir, "sha256:testart123")
+
+	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
+		t.Fatalf("start should not fail: %v", err)
+	}
+	waitForTerminal(t, svc, "testapp", 5*time.Second)
+
+	active, err := rm.ActiveReleasePath(appDir)
+	if err != nil {
+		t.Fatalf("ActiveReleasePath: %v", err)
+	}
+	wantActive := rm.ReleasePath(appDir, prevDigest)
+	if active != wantActive {
+		t.Fatalf("symlink switched to new release on failure:\ngot  %s\nwant %s", active, wantActive)
+	}
+}
+
+func TestService_Start_HealthFails_SymlinkNeverSwitched(t *testing.T) {
+	exec := &fakeExecutor{results: []fakeExecResult{
+		{output: []byte("pulled")},
+		{output: []byte("started")},
+		{output: []byte("rolled back")},
+	}}
+	svc, appDir, rm := newTestService(t, exec, &fakeHealthChecker{err: model.ErrHealthCheckFailed})
+
+	prevDigest := "sha256:prevart"
+	createTestRelease(t, rm, appDir, prevDigest)
+	if _, err := rm.Activate(appDir, prevDigest); err != nil {
+		t.Fatalf("activate prev release: %v", err)
+	}
+	createTestRelease(t, rm, appDir, "sha256:testart123")
+	os.WriteFile(filepath.Join(appDir, ".deploy.env"), []byte("APP_IMAGE=ghcr.io/org/myapp:v0.9.0\n"), 0640)
+
+	if _, err := svc.Start(context.Background(), validRequest()); err != nil {
+		t.Fatalf("start should not fail: %v", err)
+	}
+	waitForTerminal(t, svc, "testapp", 5*time.Second)
+
+	active, err := rm.ActiveReleasePath(appDir)
+	if err != nil {
+		t.Fatalf("ActiveReleasePath: %v", err)
+	}
+	wantActive := rm.ReleasePath(appDir, prevDigest)
+	if active != wantActive {
+		t.Fatalf("symlink switched to new release on health failure:\ngot  %s\nwant %s", active, wantActive)
+	}
+}

@@ -26,6 +26,7 @@ type Service struct {
 	audit    audit.Logger
 	dataDir  string
 	logger   *slog.Logger
+	releases *ReleaseManager
 	ctx      context.Context
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
@@ -43,6 +44,7 @@ type ServiceConfig struct {
 	DataDir  string
 	Logger   *slog.Logger
 	Context  context.Context
+	Releases *ReleaseManager
 }
 
 func NewService(cfg ServiceConfig) *Service {
@@ -60,6 +62,7 @@ func NewService(cfg ServiceConfig) *Service {
 		audit:    cfg.Audit,
 		dataDir:  cfg.DataDir,
 		logger:   cfg.Logger,
+		releases: cfg.Releases,
 		ctx:      serviceCtx,
 		cancel:   cancel,
 	}
@@ -110,13 +113,14 @@ func (s *Service) Start(ctx context.Context, req model.DeployRequest) (*model.De
 	}
 
 	deployment := &model.Deployment{
-		ID:        ulid.Make().String(),
-		AppName:   req.AppName,
-		Image:     req.Image,
-		Tag:       req.Tag,
-		Digest:    req.Digest,
-		Status:    model.StatusPending,
-		StartedAt: time.Now(),
+		ID:             ulid.Make().String(),
+		AppName:        req.AppName,
+		Image:          req.Image,
+		Tag:            req.Tag,
+		Digest:         req.Digest,
+		ArtifactDigest: req.ArtifactDigest,
+		Status:         model.StatusPending,
+		StartedAt:      time.Now(),
 	}
 
 	if prev := s.readCurrentImage(app); prev != "" {
@@ -165,27 +169,43 @@ func (s *Service) execute(app model.AppConfig, deployment *model.Deployment, rel
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
 	defer cancel()
 
+	// Discover previous compose files from current active release before touching anything.
+	var prevComposeFiles []string
+	if existingPath, err := s.releases.ActiveReleasePath(app.Dir); err == nil {
+		if files, err := s.releases.DiscoverComposeFiles(existingPath); err == nil {
+			prevComposeFiles = files
+		}
+	}
+
+	// Resolve compose files from the committed (but not yet active) release dir.
+	newReleasePath := s.releases.ReleasePath(app.Dir, deployment.ArtifactDigest)
+	composeFiles, err := s.releases.DiscoverComposeFiles(newReleasePath)
+	if err != nil {
+		s.failDeployment(ctx, app, deployment, "discover compose files", err, nil, prevComposeFiles)
+		return
+	}
+
 	envState, err := s.writeEnv(app, deployment.Image)
 	if err != nil {
-		s.failDeployment(ctx, deployment, "write env", err, nil)
+		s.failDeployment(ctx, app, deployment, "write env", err, nil, prevComposeFiles)
 		return
 	}
 
 	deployment.Status = model.StatusPulling
 	s.saveState(ctx, deployment)
 
-	output, err := s.executor.Exec(ctx, app.Dir, ComposePullArgs(app))
+	output, err := s.executor.Exec(ctx, app.Dir, ComposePullArgs(app, composeFiles))
 	if err != nil {
-		s.failDeployment(ctx, deployment, "compose pull", withOutput(err, output), &envState)
+		s.failDeployment(ctx, app, deployment, "compose pull", withOutput(err, output), &envState, prevComposeFiles)
 		return
 	}
 
 	deployment.Status = model.StatusStarting
 	s.saveState(ctx, deployment)
 
-	output, err = s.executor.Exec(ctx, app.Dir, ComposeUpArgs(app))
+	output, err = s.executor.Exec(ctx, app.Dir, ComposeUpArgs(app, composeFiles))
 	if err != nil {
-		s.failDeployment(ctx, deployment, "compose up", withOutput(err, output), &envState)
+		s.failDeployment(ctx, app, deployment, "compose up", withOutput(err, output), &envState, prevComposeFiles)
 		return
 	}
 
@@ -193,7 +213,13 @@ func (s *Service) execute(app model.AppConfig, deployment *model.Deployment, rel
 	s.saveState(ctx, deployment)
 
 	if err := s.health.Check(ctx, app.HealthURL, app.HealthTimeout); err != nil {
-		s.failDeployment(ctx, deployment, "health check", err, &envState)
+		s.failDeployment(ctx, app, deployment, "health check", err, &envState, prevComposeFiles)
+		return
+	}
+
+	// Activate only after health check passes.
+	if _, err := s.releases.Activate(app.Dir, deployment.ArtifactDigest); err != nil {
+		s.failDeployment(ctx, app, deployment, "activate release", err, &envState, prevComposeFiles)
 		return
 	}
 
@@ -224,6 +250,7 @@ func (s *Service) execute(app model.AppConfig, deployment *model.Deployment, rel
 		s.logger.Info("pruned old deployments", "app", deployment.AppName, "count", pruned)
 	}
 
+	s.releases.PruneReleases(app.Dir, app.KeepReleases)
 	s.pruneEnvBackups(app, 10)
 }
 
@@ -258,14 +285,36 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (s *Service) failDeployment(ctx context.Context, d *model.Deployment, step string, err error, envState *envFileState) {
+func (s *Service) failDeployment(ctx context.Context, app model.AppConfig, d *model.Deployment, step string, err error, envState *envFileState, prevComposeFiles []string) {
 	var rollbackErr error
+	var rollbackUpErr error
 	if envState != nil {
 		rollbackErr = s.restoreEnv(*envState)
+		if rollbackErr == nil && envState.Existed {
+			// Symlink was never switched; current symlink still points to previous release.
+			// Discover compose files from current active release and bring it back up.
+			activePath, activeErr := s.releases.ActiveReleasePath(app.Dir)
+			if activeErr == nil {
+				activeFiles, discoverErr := s.releases.DiscoverComposeFiles(activePath)
+				if discoverErr == nil && len(activeFiles) > 0 {
+					if _, rbErr := s.executor.Exec(ctx, app.Dir, ComposeUpArgs(app, activeFiles)); rbErr != nil {
+						s.logger.Error("rollback compose up failed", "app", d.AppName, "error", rbErr)
+						rollbackUpErr = rbErr
+					}
+				}
+			} else if len(prevComposeFiles) > 0 {
+				// Fall back to the compose files captured before deploy started.
+				if _, rbErr := s.executor.Exec(ctx, app.Dir, ComposeUpArgs(app, prevComposeFiles)); rbErr != nil {
+					s.logger.Error("rollback compose up failed", "app", d.AppName, "error", rbErr)
+					rollbackUpErr = rbErr
+				}
+			}
+		}
 	}
+	s.releases.MarkBadRelease(app.Dir, d.ArtifactDigest, step+": "+err.Error())
 	d.Status = model.StatusFailed
 	d.EndedAt = time.Now()
-	d.Error = formatFailure(step, err, rollbackErr)
+	d.Error = formatFailure(step, err, rollbackErr, rollbackUpErr)
 	s.saveState(ctx, d)
 
 	s.logAudit(ctx, model.AuditEntry{
@@ -387,11 +436,15 @@ func (s *Service) restoreEnv(state envFileState) error {
 	return nil
 }
 
-func formatFailure(step string, err error, rollbackErr error) string {
-	if rollbackErr == nil {
-		return fmt.Sprintf("%s: %v", step, err)
+func formatFailure(step string, err error, rollbackErr error, rollbackUpErr error) string {
+	s := fmt.Sprintf("%s: %v", step, err)
+	if rollbackErr != nil {
+		s += fmt.Sprintf("; restore env: %v", rollbackErr)
 	}
-	return fmt.Sprintf("%s: %v; restore env: %v", step, err, rollbackErr)
+	if rollbackUpErr != nil {
+		s += fmt.Sprintf("; rollback compose up: %v", rollbackUpErr)
+	}
+	return s
 }
 
 func withOutput(err error, output []byte) error {

@@ -34,7 +34,7 @@ func TestFileLogger_SingleEntry(t *testing.T) {
 		t.Fatalf("log: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
+	data, err := os.ReadFile(filepath.Join(dir, "myapp.jsonl"))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestFileLogger_ConcurrentWrites(t *testing.T) {
 	}
 	wg.Wait()
 
-	f, err := os.Open(filepath.Join(dir, "audit.jsonl"))
+	f, err := os.Open(filepath.Join(dir, "myapp.jsonl"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestFileLogger_AppendsToExisting(t *testing.T) {
 		logger.Log(context.Background(), entry)
 	}
 
-	f, err := os.Open(filepath.Join(dir, "audit.jsonl"))
+	f, err := os.Open(filepath.Join(dir, "myapp.jsonl"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -129,5 +129,59 @@ func TestFileLogger_AppendsToExisting(t *testing.T) {
 	}
 	if count != 3 {
 		t.Fatalf("expected 3 lines, got %d", count)
+	}
+}
+
+func TestFileLogger_WritesPerAppFiles(t *testing.T) {
+	dir := t.TempDir()
+	logger, err := NewFileLogger(dir)
+	if err != nil {
+		t.Fatalf("create logger: %v", err)
+	}
+
+	entries := []model.AuditEntry{
+		{Timestamp: time.Now(), AppName: "app1", Action: "deploy", Status: "completed"},
+		{Timestamp: time.Now(), AppName: "app2", Action: "deploy", Status: "failed"},
+		{Timestamp: time.Now(), AppName: "app1", Action: "deploy", Status: "started"},
+	}
+	for _, e := range entries {
+		if err := logger.Log(context.Background(), e); err != nil {
+			t.Fatalf("log: %v", err)
+		}
+	}
+
+	app1Path := filepath.Join(dir, "app1.jsonl")
+	app2Path := filepath.Join(dir, "app2.jsonl")
+
+	if _, err := os.Stat(app1Path); err != nil {
+		t.Fatalf("app1.jsonl missing: %v", err)
+	}
+	if _, err := os.Stat(app2Path); err != nil {
+		t.Fatalf("app2.jsonl missing: %v", err)
+	}
+
+	countLines := func(path string) int {
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatalf("open %s: %v", path, err)
+		}
+		defer f.Close()
+		scanner := bufio.NewScanner(f)
+		n := 0
+		for scanner.Scan() {
+			var e model.AuditEntry
+			if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+				t.Fatalf("invalid JSON in %s: %v", path, err)
+			}
+			n++
+		}
+		return n
+	}
+
+	if got := countLines(app1Path); got != 2 {
+		t.Fatalf("app1.jsonl: expected 2 lines, got %d", got)
+	}
+	if got := countLines(app2Path); got != 1 {
+		t.Fatalf("app2.jsonl: expected 1 line, got %d", got)
 	}
 }

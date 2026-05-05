@@ -3,6 +3,7 @@ package app
 import (
 	"cmp"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,13 +15,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var validAppName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+var validAppName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 var validDomain = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$`)
 
 type Config struct {
-	DataDir      string            `yaml:"data_dir"`
-	PollInterval time.Duration     `yaml:"poll_interval"`
-	Apps         map[string]AppRaw `yaml:"apps"`
+	DataDir        string            `yaml:"data_dir"`
+	PollInterval   time.Duration     `yaml:"poll_interval"`
+	Apps           map[string]AppRaw `yaml:"apps"`
+	TrustedProxies []string          `yaml:"trusted_proxies"`
 }
 
 type AppRaw struct {
@@ -30,12 +32,14 @@ type AppRaw struct {
 	Dir             string        `yaml:"dir"`
 	Domain          string        `yaml:"domain"`
 	Port            int           `yaml:"port"`
+	TLS             bool          `yaml:"tls"`
 	ComposeFiles    []string      `yaml:"compose_files"`
 	EnvFile         string        `yaml:"env_file"`
 	ImageVar        string        `yaml:"image_var"`
 	HealthURL       string        `yaml:"health_url"`
 	HealthTimeout   time.Duration `yaml:"health_timeout"`
-	ComposeArtifact string        `yaml:"compose_artifact"`
+	Artifact        string        `yaml:"artifact"`
+	KeepReleases    int           `yaml:"keep_releases"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -54,13 +58,19 @@ func LoadConfig(path string) (*Config, error) {
 
 	for name := range cfg.Apps {
 		if !validAppName.MatchString(name) {
-			return nil, fmt.Errorf("app name %q: must be lowercase alphanumeric with hyphens or underscores, max 63 chars", name)
+			return nil, fmt.Errorf("app name %q: must be lowercase alphanumeric with hyphens, max 63 chars", name)
 		}
 		raw, err := cfg.validateApp(name)
 		if err != nil {
 			return nil, fmt.Errorf("app %q: %w", name, err)
 		}
 		cfg.Apps[name] = raw
+	}
+
+	for _, cidr := range cfg.TrustedProxies {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return nil, fmt.Errorf("invalid trusted_proxies entry %q: %w", cidr, err)
+		}
 	}
 
 	return &cfg, nil
@@ -80,12 +90,13 @@ func (c *Config) AppConfig(name string) (model.AppConfig, bool) {
 		Dir:             raw.Dir,
 		Domain:          raw.Domain,
 		Port:            raw.Port,
-		ComposeFiles:    raw.ComposeFiles,
+		TLS:             raw.TLS,
 		EnvFile:         raw.EnvFile,
 		ImageVar:        raw.ImageVar,
 		HealthURL:       raw.HealthURL,
 		HealthTimeout:   cmp.Or(raw.HealthTimeout, 30*time.Second),
-		ComposeArtifact: raw.ComposeArtifact,
+		Artifact:        raw.Artifact,
+		KeepReleases:    raw.KeepReleases,
 	}, true
 }
 
@@ -139,15 +150,11 @@ func (c *Config) validateApp(name string) (AppRaw, error) {
 	if parsedURL.Host == "" {
 		return AppRaw{}, fmt.Errorf("health_url must include a host")
 	}
-	if len(raw.ComposeFiles) == 0 {
-		raw.ComposeFiles = []string{"docker-compose.data.yml", "docker-compose.yml"}
+	if len(raw.ComposeFiles) > 0 {
+		return AppRaw{}, fmt.Errorf("compose_files is no longer supported; use artifact instead")
 	}
-	for i, f := range raw.ComposeFiles {
-		normalized, err := normalizeRelativePath(f)
-		if err != nil {
-			return AppRaw{}, fmt.Errorf("compose_files[%d]: %w", i, err)
-		}
-		raw.ComposeFiles[i] = normalized
+	if raw.Artifact == "" {
+		return AppRaw{}, fmt.Errorf("artifact is required")
 	}
 	envFile, err := normalizeRelativePath(cmp.Or(raw.EnvFile, ".deploy.env"))
 	if err != nil {
@@ -155,6 +162,12 @@ func (c *Config) validateApp(name string) (AppRaw, error) {
 	}
 	raw.EnvFile = envFile
 	raw.ImageVar = cmp.Or(raw.ImageVar, "APP_IMAGE")
+	if raw.KeepReleases == 0 {
+		raw.KeepReleases = 5
+	}
+	if raw.KeepReleases < 1 {
+		return AppRaw{}, fmt.Errorf("keep_releases must be at least 1")
+	}
 
 	return raw, nil
 }

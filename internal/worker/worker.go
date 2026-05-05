@@ -29,50 +29,54 @@ type Deployer interface {
 	Status(ctx context.Context, appName string) (*model.Deployment, error)
 }
 
-// ComposeArtifactFetcher fetches and verifies a compose OCI artifact,
-// writing compose files to the app directory.
-type ComposeArtifactFetcher interface {
-	FetchAndVerify(ctx context.Context, artifactRef, allowedIdentity, destDir string) error
+// ArtifactFetcher fetches and verifies a compose OCI artifact,
+// writing compose files to destDir and returning the manifest digest.
+type ArtifactFetcher interface {
+	FetchAndVerify(ctx context.Context, artifactRef, allowedIdentity, destDir string) (string, error)
+	ResolveDigest(ctx context.Context, artifactRef string) (string, error)
 }
 
 // Config holds all Worker dependencies.
 type Config struct {
-	Apps           map[string]model.AppConfig
-	PollInterval   time.Duration
-	DataDir        string
-	Registry       RegistryClient
-	Verifier       SignatureVerifier
-	Deployer       Deployer
-	ComposeFetcher ComposeArtifactFetcher
-	Logger         *slog.Logger
+	Apps            map[string]model.AppConfig
+	PollInterval    time.Duration
+	DataDir         string
+	Registry        RegistryClient
+	Verifier        SignatureVerifier
+	Deployer        Deployer
+	ArtifactFetcher ArtifactFetcher
+	Releases        *deploy.ReleaseManager
+	Logger          *slog.Logger
 }
 
 // Worker polls GHCR for new image versions, verifies Sigstore signatures,
 // and triggers deploys via the deploy service.
 type Worker struct {
-	apps           map[string]model.AppConfig
-	pollInterval   time.Duration
-	dataDir        string
-	registry       RegistryClient
-	verifier       SignatureVerifier
-	deployer       Deployer
-	composeFetcher ComposeArtifactFetcher
-	logger         *slog.Logger
-	states         *stateStore
+	apps            map[string]model.AppConfig
+	pollInterval    time.Duration
+	dataDir         string
+	registry        RegistryClient
+	verifier        SignatureVerifier
+	deployer        Deployer
+	artifactFetcher ArtifactFetcher
+	releases        *deploy.ReleaseManager
+	logger          *slog.Logger
+	states          *stateStore
 }
 
 // New creates a Worker with the given configuration.
 func New(cfg Config) *Worker {
 	return &Worker{
-		apps:           cfg.Apps,
-		pollInterval:   cfg.PollInterval,
-		dataDir:        cfg.DataDir,
-		registry:       cfg.Registry,
-		verifier:       cfg.Verifier,
-		deployer:       cfg.Deployer,
-		composeFetcher: cfg.ComposeFetcher,
-		logger:         cfg.Logger,
-		states:         newStateStore(filepath.Join(cfg.DataDir, "state")),
+		apps:            cfg.Apps,
+		pollInterval:    cfg.PollInterval,
+		dataDir:         cfg.DataDir,
+		registry:        cfg.Registry,
+		verifier:        cfg.Verifier,
+		deployer:        cfg.Deployer,
+		artifactFetcher: cfg.ArtifactFetcher,
+		releases:        cfg.Releases,
+		logger:          cfg.Logger,
+		states:          newStateStore(filepath.Join(cfg.DataDir, "state")),
 	}
 }
 
@@ -143,6 +147,10 @@ func (w *Worker) drainHints(ctx context.Context) {
 // and deploys it. It is safe to call concurrently for different apps; the deploy
 // service enforces per-app serialization via its own lock.
 func (w *Worker) pollApp(ctx context.Context, app model.AppConfig) error {
+	if err := w.releases.CleanupStaleStagingDirs(app.Dir); err != nil {
+		w.logger.Warn("cleanup stale staging dirs failed", "app", app.Name, "error", err)
+	}
+
 	tag, digest, err := w.registry.LatestTag(ctx, app.Image, app.TagPattern)
 	if err != nil {
 		return fmt.Errorf("get latest tag: %w", err)
@@ -153,31 +161,50 @@ func (w *Worker) pollApp(ctx context.Context, app model.AppConfig) error {
 		return fmt.Errorf("load state: %w", err)
 	}
 	if state != nil && state.Digest == digest {
-		return nil // nothing changed
-	}
-
-	w.logger.Info("new version detected", "app", app.Name, "tag", tag, "digest", digest)
-
-	imageRef := fmt.Sprintf("%s:%s@%s", app.Image, tag, digest)
-
-	if err := w.verifier.Verify(ctx, imageRef, app.AllowedIdentity); err != nil {
-		return fmt.Errorf("signature verification: %w", err)
-	}
-	w.logger.Info("signature verified", "app", app.Name, "tag", tag)
-
-	if app.ComposeArtifact != "" && w.composeFetcher != nil {
-		artifactRef := deploy.ResolveArtifactRef(app.ComposeArtifact, tag)
-		if err := w.composeFetcher.FetchAndVerify(ctx, artifactRef, app.AllowedIdentity, app.Dir); err != nil {
-			return fmt.Errorf("fetch compose artifact: %w", err)
+		artifactRef := deploy.ResolveArtifactRef(app.Artifact, tag)
+		currentArtDigest, err := w.artifactFetcher.ResolveDigest(ctx, artifactRef)
+		if err != nil {
+			return fmt.Errorf("resolve artifact digest: %w", err)
 		}
-		w.logger.Info("compose artifact synced", "app", app.Name, "tag", tag)
+		if currentArtDigest == state.ArtifactDigest {
+			return nil
+		}
+		w.logger.Info("artifact change detected", "app", app.Name, "tag", tag)
+	} else {
+		w.logger.Info("new version detected", "app", app.Name, "tag", tag, "digest", digest)
+		imageRef := fmt.Sprintf("%s:%s@%s", app.Image, tag, digest)
+		if err := w.verifier.Verify(ctx, imageRef, app.AllowedIdentity); err != nil {
+			return fmt.Errorf("signature verification: %w", err)
+		}
+		w.logger.Info("signature verified", "app", app.Name, "tag", tag)
 	}
+
+	artifactRef := deploy.ResolveArtifactRef(app.Artifact, tag)
+
+	stagingDir, err := w.releases.CreateStagingDir(app.Dir)
+	if err != nil {
+		return fmt.Errorf("create staging dir: %w", err)
+	}
+
+	artifactDigest, err := w.artifactFetcher.FetchAndVerify(ctx, artifactRef, app.AllowedIdentity, stagingDir)
+	if err != nil {
+		w.releases.CleanupStagingDir(stagingDir)
+		return fmt.Errorf("fetch artifact: %w", err)
+	}
+
+	if err := w.releases.CommitStaging(app.Dir, stagingDir, artifactDigest); err != nil {
+		w.releases.CleanupStagingDir(stagingDir)
+		return fmt.Errorf("commit staging: %w", err)
+	}
+
+	w.logger.Info("artifact staged", "app", app.Name, "tag", tag, "artifact_digest", artifactDigest)
 
 	req := model.DeployRequest{
-		AppName: app.Name,
-		Image:   fmt.Sprintf("%s:%s", app.Image, tag),
-		Tag:     tag,
-		Digest:  digest,
+		AppName:        app.Name,
+		Image:          fmt.Sprintf("%s@%s", app.Image, digest),
+		Tag:            tag,
+		Digest:         digest,
+		ArtifactDigest: artifactDigest,
 	}
 
 	d, err := w.deployer.Start(ctx, req)
@@ -196,9 +223,10 @@ func (w *Worker) pollApp(ctx context.Context, app model.AppConfig) error {
 
 	w.logger.Info("deploy completed", "app", app.Name, "tag", tag)
 	return w.states.Save(ctx, app.Name, &AppState{
-		Tag:        tag,
-		Digest:     digest,
-		DeployedAt: time.Now(),
+		Tag:            tag,
+		Digest:         digest,
+		ArtifactDigest: artifactDigest,
+		DeployedAt:     time.Now(),
 	})
 }
 

@@ -17,32 +17,26 @@ const (
 )
 
 func newStartCmd(configPath *string) *cobra.Command {
-	return &cobra.Command{
+	var credential string
+	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Install systemd unit, start proxy and worker (requires root)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runStart(*configPath)
+			if os.Geteuid() != 0 {
+				return fmt.Errorf("furnace start requires root privileges (run with sudo)")
+			}
+			return runStart(*configPath, credential)
 		},
 	}
+	cmd.Flags().StringVar(&credential, "credential", "", "registry token (e.g. ghp_...)")
+	return cmd
 }
 
-func runStart(configPath string) error {
-	if os.Geteuid() != 0 {
-		return fmt.Errorf("furnace start requires root privileges (run with sudo)")
-	}
-
+func runStart(configPath, credential string) error {
 	cfg, err := app.LoadConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
-	}
-
-	if err := writeWorkerUnit(); err != nil {
-		return fmt.Errorf("write systemd unit: %w", err)
-	}
-
-	if err := systemctl("daemon-reload"); err != nil {
-		return fmt.Errorf("daemon-reload: %w", err)
 	}
 
 	if err := writeProxyFiles(cfg); err != nil {
@@ -53,8 +47,8 @@ func runStart(configPath string) error {
 		return fmt.Errorf("start proxy: %w", err)
 	}
 
-	if err := systemctl("enable", "--now", "furnace-worker"); err != nil {
-		return fmt.Errorf("enable worker: %w", err)
+	if err := installWorker(credential); err != nil {
+		return fmt.Errorf("install worker: %w", err)
 	}
 
 	fmt.Println("furnace started")
@@ -63,15 +57,11 @@ func runStart(configPath string) error {
 	return nil
 }
 
-func writeWorkerUnit() error {
-	if err := os.WriteFile(workerUnitDest, deploy.WorkerServiceUnit, 0644); err != nil {
-		return err
-	}
-	fmt.Printf("wrote %s\n", workerUnitDest)
-	return nil
-}
-
 func writeProxyFiles(cfg *app.Config) error {
+	if err := os.MkdirAll(proxyDir, 0755); err != nil {
+		return fmt.Errorf("create proxy dir: %w", err)
+	}
+
 	composePath := proxyDir + "/compose.yml"
 	if err := os.WriteFile(composePath, deploy.ProxyComposeYML, 0644); err != nil {
 		return fmt.Errorf("write compose.yml: %w", err)
