@@ -3,15 +3,25 @@ package verify
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"regexp"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	protocommon "github.com/sigstore/protobuf-specs/gen/pb-go/common/v1"
+	protorekor "github.com/sigstore/protobuf-specs/gen/pb-go/rekor/v1"
 	"github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/sigstore/sigstore-go/pkg/root"
+	"github.com/sigstore/sigstore-go/pkg/tlog"
 	"github.com/sigstore/sigstore-go/pkg/tuf"
 	sgverify "github.com/sigstore/sigstore-go/pkg/verify"
 	"github.com/sigstore/sigstore/pkg/signature/payload"
@@ -22,6 +32,7 @@ import (
 const (
 	bundleArtifactType = "application/vnd.dev.sigstore.bundle.v0.3+json"
 	githubOIDCIssuer   = "https://token.actions.githubusercontent.com"
+	maxEntitySize      = 1 << 20
 )
 
 // Verifier checks Sigstore keyless signatures on OCI images.
@@ -67,16 +78,11 @@ func NewFromTrustedMaterial(tm root.TrustedMaterial, keychain authn.Keychain) *V
 //
 // imageRef must be a digest-addressed reference: ghcr.io/org/repo@sha256:abc…
 func (v *Verifier) Verify(ctx context.Context, imageRef, allowedIdentity string) error {
-	bundleJSON, err := v.fetchBundle(ctx, imageRef)
+	entity, err := v.fetchEntity(ctx, imageRef)
 	if err != nil {
 		return fmt.Errorf("%w: %v", model.ErrSignatureInvalid, err)
 	}
-
-	b := new(bundle.Bundle)
-	if err := b.UnmarshalJSON(bundleJSON); err != nil {
-		return fmt.Errorf("%w: parse bundle: %v", model.ErrSignatureInvalid, err)
-	}
-	return v.verifyEntity(imageRef, allowedIdentity, b)
+	return v.verifyEntity(imageRef, allowedIdentity, entity)
 }
 
 func (v *Verifier) verifyEntity(imageRef, allowedIdentity string, entity sgverify.SignedEntity) error {
@@ -123,9 +129,25 @@ func (v *Verifier) verifyEntity(imageRef, allowedIdentity string, entity sgverif
 	return nil
 }
 
+func (v *Verifier) fetchEntity(ctx context.Context, imageRef string) (sgverify.SignedEntity, error) {
+	bundleJSON, err := v.fetchBundle(ctx, imageRef)
+	if err == nil {
+		b := new(bundle.Bundle)
+		if err := b.UnmarshalJSON(bundleJSON); err != nil {
+			return nil, fmt.Errorf("parse bundle: %w", err)
+		}
+		return b, nil
+	}
+
+	legacyEntity, legacyErr := v.fetchLegacySignature(ctx, imageRef)
+	if legacyErr == nil {
+		return legacyEntity, nil
+	}
+
+	return nil, fmt.Errorf("%v; %v", err, legacyErr)
+}
+
 // fetchBundle fetches the Sigstore bundle JSON from OCI referrers of the image.
-// cosign 2.x stores the bundle as the config blob of an OCI artifact whose
-// artifactType is application/vnd.dev.sigstore.bundle.v0.3+json.
 func (v *Verifier) fetchBundle(ctx context.Context, imageRef string) ([]byte, error) {
 	digestRef, err := name.NewDigest(imageRef, v.nameOpts...)
 	if err != nil {
@@ -163,7 +185,7 @@ func (v *Verifier) fetchBundle(ctx context.Context, imageRef string) ([]byte, er
 		if err != nil {
 			return nil, fmt.Errorf("read bundle manifest: %w", err)
 		}
-		if bundleMF.Config.Size > 1<<20 {
+		if bundleMF.Config.Size > maxEntitySize {
 			return nil, fmt.Errorf("bundle config exceeds size limit")
 		}
 		data, err := bundleImg.RawConfigFile()
@@ -182,7 +204,7 @@ func (v *Verifier) fetchBundle(ctx context.Context, imageRef string) ([]byte, er
 		if err != nil {
 			continue
 		}
-		data, err = io.ReadAll(io.LimitReader(rc, 1<<20))
+		data, err = io.ReadAll(io.LimitReader(rc, maxEntitySize))
 		rc.Close()
 		if err == nil && len(data) > 0 {
 			return data, nil
@@ -190,3 +212,179 @@ func (v *Verifier) fetchBundle(ctx context.Context, imageRef string) ([]byte, er
 	}
 	return nil, fmt.Errorf("no sigstore bundle found in referrers of %s", imageRef)
 }
+
+func (v *Verifier) fetchLegacySignature(ctx context.Context, imageRef string) (sgverify.SignedEntity, error) {
+	digestRef, err := name.NewDigest(imageRef, v.nameOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("parse digest ref %s: %w", imageRef, err)
+	}
+
+	opts := []remote.Option{
+		remote.WithContext(ctx),
+		remote.WithAuthFromKeychain(v.keychain),
+	}
+
+	tagRef := digestRef.Context().Tag(legacySignatureTag(digestRef.DigestStr()))
+	img, err := remote.Image(tagRef, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("fetch legacy signature %s: %w", tagRef, err)
+	}
+
+	manifest, err := img.Manifest()
+	if err != nil {
+		return nil, fmt.Errorf("read legacy signature manifest: %w", err)
+	}
+	if len(manifest.Layers) == 0 {
+		return nil, fmt.Errorf("legacy signature manifest has no layers")
+	}
+
+	layer := manifest.Layers[0]
+	sigB64 := layer.Annotations["dev.cosignproject.cosign/signature"]
+	if sigB64 == "" {
+		return nil, fmt.Errorf("legacy signature manifest missing signature annotation")
+	}
+	bundleJSON := layer.Annotations["dev.sigstore.cosign/bundle"]
+	if bundleJSON == "" {
+		return nil, fmt.Errorf("legacy signature manifest missing bundle annotation")
+	}
+	certPEM := layer.Annotations["dev.sigstore.cosign/certificate"]
+	if certPEM == "" {
+		return nil, fmt.Errorf("legacy signature manifest missing certificate annotation")
+	}
+
+	signatureBytes, err := base64.StdEncoding.DecodeString(sigB64)
+	if err != nil {
+		return nil, fmt.Errorf("decode legacy signature: %w", err)
+	}
+
+	layers, err := img.Layers()
+	if err != nil || len(layers) == 0 {
+		return nil, fmt.Errorf("read legacy signature layers: %w", err)
+	}
+	rc, err := layers[0].Compressed()
+	if err != nil {
+		return nil, fmt.Errorf("open legacy signature payload: %w", err)
+	}
+	payloadBytes, err := io.ReadAll(io.LimitReader(rc, maxEntitySize+1))
+	rc.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read legacy signature payload: %w", err)
+	}
+	if len(payloadBytes) > maxEntitySize {
+		return nil, fmt.Errorf("legacy signature payload exceeds size limit")
+	}
+
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil {
+		return nil, fmt.Errorf("parse legacy certificate: invalid PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse legacy certificate: %w", err)
+	}
+
+	entry, err := parseLegacyBundle(bundleJSON)
+	if err != nil {
+		return nil, fmt.Errorf("parse legacy bundle: %w", err)
+	}
+
+	sum := sha256.Sum256(payloadBytes)
+	return &legacySignedEntity{
+		signatureContent:    bundle.NewMessageSignature(sum[:], "SHA2_256", signatureBytes),
+		verificationContent: bundle.NewCertificate(cert),
+		tlogEntries:         []*tlog.Entry{entry},
+		version:             "cosign-legacy",
+	}, nil
+}
+
+func legacySignatureTag(digest string) string {
+	return "sha256-" + strings.TrimPrefix(digest, "sha256:") + ".sig"
+}
+
+type legacyBundleAnnotation struct {
+	SignedEntryTimestamp string `json:"SignedEntryTimestamp"`
+	Payload              struct {
+		Body           string `json:"body"`
+		IntegratedTime int64  `json:"integratedTime"`
+		LogIndex       int64  `json:"logIndex"`
+		LogID          string `json:"logID"`
+	} `json:"Payload"`
+}
+
+type rekorBodyHeader struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+}
+
+func parseLegacyBundle(raw string) (*tlog.Entry, error) {
+	var lb legacyBundleAnnotation
+	if err := json.Unmarshal([]byte(raw), &lb); err != nil {
+		return nil, err
+	}
+	body, err := base64.StdEncoding.DecodeString(lb.Payload.Body)
+	if err != nil {
+		return nil, fmt.Errorf("decode rekor body: %w", err)
+	}
+	logID, err := hex.DecodeString(lb.Payload.LogID)
+	if err != nil {
+		return nil, fmt.Errorf("decode log id: %w", err)
+	}
+	set, err := base64.StdEncoding.DecodeString(lb.SignedEntryTimestamp)
+	if err != nil {
+		return nil, fmt.Errorf("decode signed entry timestamp: %w", err)
+	}
+
+	header := rekorBodyHeader{APIVersion: "0.0.1", Kind: "hashedrekord"}
+	if err := json.Unmarshal(body, &header); err != nil {
+		return nil, fmt.Errorf("decode rekor body header: %w", err)
+	}
+
+	tle := &protorekor.TransparencyLogEntry{
+		CanonicalizedBody: body,
+		LogIndex:          lb.Payload.LogIndex,
+		LogId:             &protocommon.LogId{KeyId: logID},
+		IntegratedTime:    lb.Payload.IntegratedTime,
+		KindVersion: &protorekor.KindVersion{
+			Kind:    header.Kind,
+			Version: header.APIVersion,
+		},
+		InclusionPromise: &protorekor.InclusionPromise{
+			SignedEntryTimestamp: set,
+		},
+	}
+	return tlog.ParseTransparencyLogEntry(tle)
+}
+
+type legacySignedEntity struct {
+	sgverify.BaseSignedEntity
+	signatureContent    sgverify.SignatureContent
+	verificationContent sgverify.VerificationContent
+	tlogEntries         []*tlog.Entry
+	version             string
+}
+
+func (e *legacySignedEntity) HasInclusionPromise() bool {
+	return true
+}
+
+func (e *legacySignedEntity) SignatureContent() (sgverify.SignatureContent, error) {
+	return e.signatureContent, nil
+}
+
+func (e *legacySignedEntity) VerificationContent() (sgverify.VerificationContent, error) {
+	return e.verificationContent, nil
+}
+
+func (e *legacySignedEntity) TlogEntries() ([]*tlog.Entry, error) {
+	return e.tlogEntries, nil
+}
+
+func (e *legacySignedEntity) Timestamps() ([][]byte, error) {
+	return [][]byte{}, nil
+}
+
+func (e *legacySignedEntity) Version() (string, error) {
+	return e.version, nil
+}
+
+var _ sgverify.SignedEntity = (*legacySignedEntity)(nil)
