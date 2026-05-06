@@ -1,12 +1,12 @@
 package verify
 
 import (
+	"bytes"
 	"context"
-	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"regexp"
-	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -15,6 +15,7 @@ import (
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/tuf"
 	sgverify "github.com/sigstore/sigstore-go/pkg/verify"
+	"github.com/sigstore/sigstore/pkg/signature/payload"
 
 	"github.com/go-sum/furnace/internal/model"
 )
@@ -30,6 +31,7 @@ const (
 type Verifier struct {
 	trustedRoot root.TrustedMaterial
 	keychain    authn.Keychain
+	nameOpts    []name.Option
 }
 
 // New creates a Verifier by fetching the Sigstore public trust root from TUF.
@@ -52,19 +54,42 @@ func New(cacheDir string, keychain authn.Keychain) (*Verifier, error) {
 	}, nil
 }
 
+// NewFromTrustedMaterial creates a Verifier from a pre-fetched TrustedMaterial.
+// Intended for tests that bypass TUF. If keychain is nil, authn.DefaultKeychain is used.
+func NewFromTrustedMaterial(tm root.TrustedMaterial, keychain authn.Keychain) *Verifier {
+	if keychain == nil {
+		keychain = authn.DefaultKeychain
+	}
+	return &Verifier{trustedRoot: tm, keychain: keychain}
+}
+
 // Verify checks that the image at imageRef has a valid Sigstore keyless signature
 // from a GitHub Actions workflow belonging to allowedIdentity (format: "org/repo").
 //
 // imageRef must be a digest-addressed reference: ghcr.io/org/repo@sha256:abc…
 func (v *Verifier) Verify(ctx context.Context, imageRef, allowedIdentity string) error {
+	digestRef, err := name.NewDigest(imageRef, v.nameOpts...)
+	if err != nil {
+		return fmt.Errorf("%w: parse image ref: %v", model.ErrSignatureInvalid, err)
+	}
+
 	bundleJSON, err := v.fetchBundle(ctx, imageRef)
 	if err != nil {
-		return fmt.Errorf("%w: fetch bundle for %s: %v", model.ErrSignatureInvalid, imageRef, err)
+		return fmt.Errorf("%w: %v", model.ErrSignatureInvalid, err)
 	}
 
 	b := new(bundle.Bundle)
 	if err := b.UnmarshalJSON(bundleJSON); err != nil {
 		return fmt.Errorf("%w: parse bundle: %v", model.ErrSignatureInvalid, err)
+	}
+
+	if b.GetMessageSignature() == nil {
+		return fmt.Errorf("%w: bundle has no message signature", model.ErrSignatureInvalid)
+	}
+
+	expectedPayload, err := payload.Cosign{Image: digestRef}.MarshalJSON()
+	if err != nil {
+		return fmt.Errorf("%w: build expected payload: %v", model.ErrSignatureInvalid, err)
 	}
 
 	sv, err := sgverify.NewVerifier(v.trustedRoot,
@@ -75,12 +100,6 @@ func (v *Verifier) Verify(ctx context.Context, imageRef, allowedIdentity string)
 		return fmt.Errorf("create signed entity verifier: %w", err)
 	}
 
-	digestBytes, err := digestHexBytes(imageRef)
-	if err != nil {
-		return fmt.Errorf("parse image digest from %s: %w", imageRef, err)
-	}
-
-	// Match any workflow URL in the given org/repo.
 	sanRegexp := `^https://github\.com/` + regexp.QuoteMeta(allowedIdentity) + `/`
 	identity, err := sgverify.NewShortCertificateIdentity(githubOIDCIssuer, "", "", sanRegexp)
 	if err != nil {
@@ -88,12 +107,35 @@ func (v *Verifier) Verify(ctx context.Context, imageRef, allowedIdentity string)
 	}
 
 	policy := sgverify.NewPolicy(
-		sgverify.WithArtifactDigest("sha256", digestBytes),
+		sgverify.WithArtifact(bytes.NewReader(expectedPayload)),
 		sgverify.WithCertificateIdentity(identity),
 	)
 
 	if _, err := sv.Verify(b, policy); err != nil {
 		return fmt.Errorf("%w: %v", model.ErrSignatureInvalid, err)
+	}
+
+	if err := validatePayload(expectedPayload, digestRef); err != nil {
+		return fmt.Errorf("%w: %v", model.ErrSignatureInvalid, err)
+	}
+	return nil
+}
+
+// validatePayload confirms that the cosign payload JSON encodes the expected
+// image digest and repository identity. This provides a defence-in-depth check
+// after the cryptographic verification.
+func validatePayload(data []byte, ref name.Digest) error {
+	var p payload.Cosign
+	if err := json.Unmarshal(data, &p); err != nil {
+		return fmt.Errorf("payload content mismatch: %v", err)
+	}
+	if p.Image.DigestStr() != ref.DigestStr() {
+		return fmt.Errorf("payload digest %s does not match expected %s",
+			p.Image.DigestStr(), ref.DigestStr())
+	}
+	if p.ClaimedIdentity != ref.Context().Name() {
+		return fmt.Errorf("payload identity %q does not match expected %q",
+			p.ClaimedIdentity, ref.Context().Name())
 	}
 	return nil
 }
@@ -102,7 +144,7 @@ func (v *Verifier) Verify(ctx context.Context, imageRef, allowedIdentity string)
 // cosign 2.x stores the bundle as the config blob of an OCI artifact whose
 // artifactType is application/vnd.dev.sigstore.bundle.v0.3+json.
 func (v *Verifier) fetchBundle(ctx context.Context, imageRef string) ([]byte, error) {
-	digestRef, err := name.NewDigest(imageRef)
+	digestRef, err := name.NewDigest(imageRef, v.nameOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("parse digest ref %s: %w", imageRef, err)
 	}
@@ -158,20 +200,4 @@ func (v *Verifier) fetchBundle(ctx context.Context, imageRef string) ([]byte, er
 		}
 	}
 	return nil, fmt.Errorf("no sigstore bundle found in referrers of %s", imageRef)
-}
-
-// digestHexBytes parses the hex-encoded digest bytes from a reference like
-// "ghcr.io/org/repo@sha256:abc123..." or "sha256:abc123...".
-func digestHexBytes(imageRef string) ([]byte, error) {
-	// Find sha256:<hex> anywhere in the ref.
-	idx := strings.Index(imageRef, "sha256:")
-	if idx < 0 {
-		return nil, fmt.Errorf("no sha256 digest in %q", imageRef)
-	}
-	hexStr := imageRef[idx+len("sha256:"):]
-	// Trim anything after the hex (e.g. trailing slash or query string).
-	if end := strings.IndexAny(hexStr, " \t\n@"); end >= 0 {
-		hexStr = hexStr[:end]
-	}
-	return hex.DecodeString(hexStr)
 }

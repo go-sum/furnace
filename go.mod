@@ -6,6 +6,7 @@ require (
 	github.com/go-sum/foundry/pkg/web v0.1.0
 	github.com/google/go-containerregistry v0.21.5
 	github.com/oklog/ulid/v2 v2.1.1
+	github.com/sigstore/sigstore v1.10.0
 	github.com/sigstore/sigstore-go v1.1.4
 	github.com/spf13/cobra v1.10.2
 	gopkg.in/yaml.v3 v3.0.1
@@ -68,7 +69,6 @@ require (
 	github.com/sigstore/protobuf-specs v0.5.0 // indirect
 	github.com/sigstore/rekor v1.4.3 // indirect
 	github.com/sigstore/rekor-tiles/v2 v2.0.1 // indirect
-	github.com/sigstore/sigstore v1.10.0 // indirect
 	github.com/sigstore/timestamp-authority/v2 v2.0.3 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect

@@ -2,8 +2,10 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -17,7 +19,7 @@ const (
 )
 
 func newStartCmd(configPath *string) *cobra.Command {
-	var credential string
+	var credentialStdin bool
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Install systemd unit, start proxy and worker (requires root)",
@@ -26,10 +28,21 @@ func newStartCmd(configPath *string) *cobra.Command {
 			if os.Geteuid() != 0 {
 				return fmt.Errorf("furnace start requires root privileges (run with sudo)")
 			}
+			var credential string
+			if credentialStdin {
+				data, err := io.ReadAll(os.Stdin)
+				if err != nil {
+					return fmt.Errorf("read credential from stdin: %w", err)
+				}
+				credential = strings.TrimSpace(string(data))
+				if credential == "" {
+					return fmt.Errorf("--credential-stdin provided but stdin was empty")
+				}
+			}
 			return runStart(*configPath, credential)
 		},
 	}
-	cmd.Flags().StringVar(&credential, "credential", "", "registry token (e.g. ghp_...)")
+	cmd.Flags().BoolVar(&credentialStdin, "credential-stdin", false, "read registry token from stdin")
 	return cmd
 }
 

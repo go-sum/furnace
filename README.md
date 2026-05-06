@@ -252,21 +252,20 @@ Leave `tls` unset or set it to `false`. Use a [Cloudflare Tunnel](https://develo
 sudo furnace start
 
 # Or with private registry support (e.g. ghcr.io private images):
-sudo furnace start --credential ghp_TOKEN
+echo "$GHCR_TOKEN" | sudo furnace start --credential-stdin
 ```
 
 If `ghcr.io/go-sum/furnace-web` and its compose artifact are public, omit
-`--credential`. Use `--credential` only when your app image or compose artifact
+`--credential-stdin`. Use `--credential-stdin` only when your app image or compose artifact
 is private.
 
-Minimum GitHub token permissions when `--credential` is needed:
+Minimum GitHub token permissions when `--credential-stdin` is needed:
 
 - **Fine-grained personal access token:** grant the token access to the owner/repositories that publish the GHCR package, then enable **Packages: Read**.
 - **Classic personal access token:** enable **`read:packages`** only.
 
 The token value is a GitHub personal access token such as `github_pat_...` or
-`ghp_...`. It is not the `.sig` object shown on the GHCR package page; `.sig`
-artifacts are cosign signatures, not registry credentials.
+`ghp_...`.
 
 This single command:
 1. Writes `/etc/systemd/system/furnace-worker.service`
@@ -401,7 +400,7 @@ Global flag: `--config` sets the config file path (default: `/etc/furnace/furnac
 | Command | Requires root | Description |
 |---------|--------------|-------------|
 | `furnace init` | yes | Create system user, directories, config scaffold, and `caddy_net` network. Idempotent. |
-| `furnace start [--credential TOKEN]` | yes | Write systemd unit, start Caddy proxy, enable and start worker. Pass `--credential` to store an encrypted registry token. |
+| `furnace start [--credential-stdin]` | yes | Write systemd unit, start Caddy proxy, enable and start worker. Pass `--credential-stdin` to read a registry token from stdin. |
 | `furnace reset` | yes | Remove all furnace state — inverse of `init` + `start`. Prompts for confirmation. |
 | `furnace validate` | no | Parse and validate the config file; print app count. |
 | `furnace mkcert --install` | yes | Generate ECDSA P-256 CA, write to `/var/lib/furnace/ca/`, install to system trust store. Skips if CA already exists. |

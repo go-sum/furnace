@@ -30,6 +30,8 @@ jobs:
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
 
       - name: Build
         env:
@@ -64,6 +66,8 @@ jobs:
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
 
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -78,7 +82,7 @@ jobs:
         run: |
           DIGEST=$(oras manifest fetch --descriptor \
             "ghcr.io/go-sum/furnace-web:${{ github.ref_name }}-compose" | jq -r '.digest')
-          cosign sign --yes "ghcr.io/go-sum/furnace-web@${DIGEST}"
+          cosign sign --yes --registry-referrers-mode=oci-1-1 "ghcr.io/go-sum/furnace-web@${DIGEST}"
 
   docker-image:
     runs-on: ubuntu-latest
@@ -95,6 +99,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
 
       - name: Build and push
         id: build
@@ -111,4 +117,4 @@ jobs:
             ghcr.io/go-sum/furnace-web:latest
 
       - name: Sign image
-        run: cosign sign --yes "ghcr.io/go-sum/furnace-web@${{ steps.build.outputs.digest }}"
+        run: cosign sign --yes --registry-referrers-mode=oci-1-1 "ghcr.io/go-sum/furnace-web@${{ steps.build.outputs.digest }}"

@@ -62,10 +62,15 @@ type Worker struct {
 	releases        *deploy.ReleaseManager
 	logger          *slog.Logger
 	states          *stateStore
+	backoffs        map[string]*backoff
 }
 
 // New creates a Worker with the given configuration.
 func New(cfg Config) *Worker {
+	boffs := make(map[string]*backoff, len(cfg.Apps))
+	for name := range cfg.Apps {
+		boffs[name] = &backoff{}
+	}
 	return &Worker{
 		apps:            cfg.Apps,
 		pollInterval:    cfg.PollInterval,
@@ -77,6 +82,7 @@ func New(cfg Config) *Worker {
 		releases:        cfg.Releases,
 		logger:          cfg.Logger,
 		states:          newStateStore(filepath.Join(cfg.DataDir, "state")),
+		backoffs:        boffs,
 	}
 }
 
@@ -112,8 +118,16 @@ func (w *Worker) pollAll(ctx context.Context) {
 	}
 	sort.Strings(names)
 	for _, n := range names {
+		b := w.backoffs[n]
+		if !b.ready() {
+			w.logger.Debug("poll deferred by backoff", "app", n, "failures", b.failures)
+			continue
+		}
 		if err := w.pollApp(ctx, w.apps[n]); err != nil {
 			w.logger.Error("poll failed", "app", n, "error", err)
+			b.record(w.pollInterval)
+		} else {
+			b.reset()
 		}
 	}
 }
@@ -137,8 +151,11 @@ func (w *Worker) drainHints(ctx context.Context) {
 			continue
 		}
 		w.logger.Info("hint triggered poll", "app", appName)
+		b := w.backoffs[appName]
+		b.reset()
 		if err := w.pollApp(ctx, app); err != nil {
 			w.logger.Error("hint poll failed", "app", appName, "error", err)
+			b.record(w.pollInterval)
 		}
 	}
 }

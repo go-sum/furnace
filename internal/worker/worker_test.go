@@ -450,6 +450,163 @@ func TestWorker_PollApp_ArtifactUnchanged(t *testing.T) {
 	}
 }
 
+func TestWorker_PollAll_BackoffSkipsFailingApp(t *testing.T) {
+	// "myapp" will fail; "otherapp" will succeed.
+	// After the first pollAll, myapp has failures=1 and a future nextPoll.
+	// A second pollAll must skip myapp and still poll otherapp.
+
+	myappPollCount := 0
+	otherappPollCount := 0
+
+	myReg := &countingRegistry{
+		inner: &fakeRegistry{err: errors.New("UNAUTHORIZED")},
+		count: &myappPollCount,
+	}
+	okReg := &countingRegistry{
+		inner: &fakeRegistry{tag: "v1.0.0", digest: "sha256:ok"},
+		count: &otherappPollCount,
+	}
+
+	dir := t.TempDir()
+	myAppDir := filepath.Join(dir, "apps", "myapp")
+	otherAppDir := filepath.Join(dir, "apps", "otherapp")
+	os.MkdirAll(myAppDir, 0750)
+	os.MkdirAll(otherAppDir, 0750)
+	rm := deploy.NewReleaseManager(slog.Default())
+
+	// Use a selectiveRegistry that dispatches by image name.
+	selReg := &selectiveRegistry{
+		registries: map[string]RegistryClient{
+			"ghcr.io/org/myapp":    myReg,
+			"ghcr.io/org/otherapp": okReg,
+		},
+	}
+
+	dep := &fakeDeployer{deployID: "d1", returnStatus: model.StatusCompleted}
+	w := New(Config{
+		Apps: map[string]model.AppConfig{
+			"myapp":    testApp(myAppDir),
+			"otherapp": {Name: "otherapp", Image: "ghcr.io/org/otherapp", TagPattern: "v*", AllowedIdentity: "org/otherapp", Dir: otherAppDir, Artifact: "ghcr.io/org/otherapp:{tag}-compose"},
+		},
+		PollInterval:    time.Minute,
+		DataDir:         dir,
+		Registry:        selReg,
+		Verifier:        &fakeVerifier{},
+		Deployer:        dep,
+		ArtifactFetcher: &fakeArtifactFetcher{},
+		Releases:        rm,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
+	})
+
+	w.pollAll(context.Background())
+
+	// Both apps polled on first round.
+	if myappPollCount != 1 {
+		t.Fatalf("expected myapp polled 1 time on first round, got %d", myappPollCount)
+	}
+	if otherappPollCount != 1 {
+		t.Fatalf("expected otherapp polled 1 time on first round, got %d", otherappPollCount)
+	}
+	if w.backoffs["myapp"].failures != 1 {
+		t.Fatalf("expected myapp failures=1, got %d", w.backoffs["myapp"].failures)
+	}
+
+	// Second pollAll: myapp is in backoff, otherapp polls again.
+	w.pollAll(context.Background())
+
+	if myappPollCount != 1 {
+		t.Fatalf("myapp should be skipped on second round, got %d polls", myappPollCount)
+	}
+	if otherappPollCount != 2 {
+		t.Fatalf("otherapp should be polled again, got %d polls", otherappPollCount)
+	}
+}
+
+func TestWorker_PollAll_BackoffResetsOnSuccess(t *testing.T) {
+	pollCount := 0
+	reg := &countingRegistry{
+		inner: &fakeRegistry{err: errors.New("fail")},
+		count: &pollCount,
+	}
+	dep := &fakeDeployer{deployID: "d1", returnStatus: model.StatusCompleted}
+	w, _ := newTestWorker(t, reg, &fakeVerifier{}, dep)
+
+	w.pollAll(context.Background())
+	if w.backoffs["myapp"].failures != 1 {
+		t.Fatalf("expected failures=1 after first failed poll, got %d", w.backoffs["myapp"].failures)
+	}
+
+	// Fix the registry and move nextPoll into the past to bypass the wait.
+	reg.inner = &fakeRegistry{tag: "v1.0.0", digest: "sha256:abc"}
+	w.backoffs["myapp"].nextPoll = time.Now().Add(-time.Second)
+
+	w.pollAll(context.Background())
+
+	if w.backoffs["myapp"].failures != 0 {
+		t.Fatalf("expected failures=0 after successful poll, got %d", w.backoffs["myapp"].failures)
+	}
+}
+
+func TestWorker_DrainHints_ResetsBackoff(t *testing.T) {
+	pollCount := 0
+	reg := &countingRegistry{
+		inner: &fakeRegistry{tag: "v1.0.0", digest: "sha256:abc"},
+		count: &pollCount,
+	}
+	dep := &fakeDeployer{deployID: "d1", returnStatus: model.StatusCompleted}
+	w, _ := newTestWorker(t, reg, &fakeVerifier{}, dep)
+
+	// Simulate accumulated backoff with a far-future nextPoll.
+	w.backoffs["myapp"].failures = 3
+	w.backoffs["myapp"].nextPoll = time.Now().Add(time.Hour)
+
+	hintDir := filepath.Join(w.dataDir, "hints")
+	os.MkdirAll(hintDir, 0750)
+	os.WriteFile(filepath.Join(hintDir, "myapp"), nil, 0640)
+
+	w.drainHints(context.Background())
+
+	if pollCount != 1 {
+		t.Fatalf("expected hint to trigger exactly 1 poll, got %d", pollCount)
+	}
+	if w.backoffs["myapp"].failures != 0 {
+		t.Fatalf("expected failures=0 after successful hint poll, got %d", w.backoffs["myapp"].failures)
+	}
+}
+
+func TestWorker_DrainHints_RecordsFailureAfterHint(t *testing.T) {
+	reg := &fakeRegistry{err: errors.New("still broken")}
+	dep := &fakeDeployer{}
+	w, _ := newTestWorker(t, reg, &fakeVerifier{}, dep)
+
+	// Simulate accumulated backoff.
+	w.backoffs["myapp"].failures = 3
+	w.backoffs["myapp"].nextPoll = time.Now().Add(time.Hour)
+
+	hintDir := filepath.Join(w.dataDir, "hints")
+	os.MkdirAll(hintDir, 0750)
+	os.WriteFile(filepath.Join(hintDir, "myapp"), nil, 0640)
+
+	w.drainHints(context.Background())
+
+	// Hint resets to 0 then records failure → failures=1 (fresh restart, not cumulative).
+	if w.backoffs["myapp"].failures != 1 {
+		t.Fatalf("expected failures=1 after hint-triggered failure, got %d", w.backoffs["myapp"].failures)
+	}
+}
+
+// selectiveRegistry dispatches LatestTag calls to per-image RegistryClient instances.
+type selectiveRegistry struct {
+	registries map[string]RegistryClient
+}
+
+func (s *selectiveRegistry) LatestTag(ctx context.Context, repo, pattern string) (string, string, error) {
+	if r, ok := s.registries[repo]; ok {
+		return r.LatestTag(ctx, repo, pattern)
+	}
+	return "", "", errors.New("no registry for " + repo)
+}
+
 func TestWorker_PollApp_ArtifactResolveFailure(t *testing.T) {
 	reg := &fakeRegistry{tag: "v1.0.0", digest: "sha256:abc"}
 	dep := &fakeDeployer{}
