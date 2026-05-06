@@ -18,6 +18,7 @@ import (
 )
 
 const maxBlobSize = 1 << 20 // 1MB per file
+const maxLayers = 20
 const artifactTrackingFile = ".furnace-files"
 
 // artifactVerifier is satisfied by *verify.Verifier.
@@ -72,6 +73,9 @@ func (f *ArtifactFetcher) FetchAndVerify(ctx context.Context, artifactRef, allow
 	}
 	if len(manifest.Layers) == 0 {
 		return "", fmt.Errorf("artifact %q contains no files", artifactRef)
+	}
+	if len(manifest.Layers) > maxLayers {
+		return "", fmt.Errorf("artifact %q has %d layers, exceeding limit of %d", artifactRef, len(manifest.Layers), maxLayers)
 	}
 
 	// Phase 1: fetch all blobs into memory before touching the filesystem.

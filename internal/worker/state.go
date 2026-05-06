@@ -52,8 +52,23 @@ func (s *stateStore) Save(_ context.Context, appName string, st *AppState) error
 		return fmt.Errorf("marshal state for %s: %w", appName, err)
 	}
 	tmp := s.path(appName) + ".tmp"
-	if err := os.WriteFile(tmp, data, 0640); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0640)
+	if err != nil {
+		return fmt.Errorf("open state tmp for %s: %w", appName, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
 		return fmt.Errorf("write state tmp for %s: %w", appName, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("sync state tmp for %s: %w", appName, err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("close state tmp for %s: %w", appName, err)
 	}
 	if err := os.Rename(tmp, s.path(appName)); err != nil {
 		os.Remove(tmp)

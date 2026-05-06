@@ -255,6 +255,19 @@ sudo furnace start
 sudo furnace start --credential ghp_TOKEN
 ```
 
+If `ghcr.io/go-sum/furnace-web` and its compose artifact are public, omit
+`--credential`. Use `--credential` only when your app image or compose artifact
+is private.
+
+Minimum GitHub token permissions when `--credential` is needed:
+
+- **Fine-grained personal access token:** grant the token access to the owner/repositories that publish the GHCR package, then enable **Packages: Read**.
+- **Classic personal access token:** enable **`read:packages`** only.
+
+The token value is a GitHub personal access token such as `github_pat_...` or
+`ghp_...`. It is not the `.sig` object shown on the GHCR package page; `.sig`
+artifacts are cosign signatures, not registry credentials.
+
 This single command:
 1. Writes `/etc/systemd/system/furnace-worker.service`
 2. Runs `systemctl daemon-reload`

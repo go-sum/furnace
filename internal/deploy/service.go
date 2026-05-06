@@ -364,8 +364,23 @@ func (s *Service) writeEnv(app model.AppConfig, image string) (envFileState, err
 
 	content := fmt.Sprintf("%s=%s\n", app.ImageVar, image)
 	tmpPath := envPath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(content), 0640); err != nil {
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0640)
+	if err != nil {
+		return envFileState{}, fmt.Errorf("open env tmp: %w", err)
+	}
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
 		return envFileState{}, fmt.Errorf("write env tmp: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return envFileState{}, fmt.Errorf("sync env tmp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return envFileState{}, fmt.Errorf("close env tmp: %w", err)
 	}
 	if err := os.Rename(tmpPath, envPath); err != nil {
 		os.Remove(tmpPath)

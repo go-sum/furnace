@@ -1,9 +1,9 @@
 package deploy
 
 import (
+	"crypto/rand"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,7 +34,11 @@ func (rm *ReleaseManager) CreateStagingDir(appDir string) (string, error) {
 	if err := os.MkdirAll(relDir, 0755); err != nil {
 		return "", fmt.Errorf("create releases dir: %w", err)
 	}
-	stagingDir := filepath.Join(relDir, fmt.Sprintf(".staging-%x", rand.Uint64()))
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("random staging suffix: %w", err)
+	}
+	stagingDir := filepath.Join(relDir, fmt.Sprintf(".staging-%x", buf))
 	if err := os.MkdirAll(stagingDir, 0755); err != nil {
 		return "", fmt.Errorf("create staging dir: %w", err)
 	}

@@ -10,9 +10,6 @@ permissions:
   id-token: write   # OIDC token for Sigstore keyless signing
   packages: write   # push OCI artifacts to GHCR
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -25,9 +22,9 @@ jobs:
             goarch: arm64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
 
@@ -52,7 +49,7 @@ jobs:
             furnace-${{ matrix.goos }}-${{ matrix.goarch }}
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             furnace-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -61,9 +58,9 @@ jobs:
   compose-artifact:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: oras-project/setup-oras@v1
+      - uses: oras-project/setup-oras@v1.2.4
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -86,11 +83,11 @@ jobs:
   docker-image:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v6
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -98,7 +95,7 @@ jobs:
       - uses: sigstore/cosign-installer@v3
       - name: Build and push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64

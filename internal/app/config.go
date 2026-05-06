@@ -33,7 +33,6 @@ type AppRaw struct {
 	Domain          string        `yaml:"domain"`
 	Port            int           `yaml:"port"`
 	TLS             bool          `yaml:"tls"`
-	ComposeFiles    []string      `yaml:"compose_files"`
 	EnvFile         string        `yaml:"env_file"`
 	ImageVar        string        `yaml:"image_var"`
 	HealthURL       string        `yaml:"health_url"`
@@ -115,6 +114,9 @@ func (c *Config) validateApp(name string) (AppRaw, error) {
 	if raw.Image == "" {
 		return AppRaw{}, fmt.Errorf("image is required")
 	}
+	if strings.ContainsAny(raw.Image, " \t\r\n") || !strings.Contains(raw.Image, "/") {
+		return AppRaw{}, fmt.Errorf("image must be a valid OCI reference (e.g. ghcr.io/org/app)")
+	}
 	if raw.TagPattern == "" {
 		return AppRaw{}, fmt.Errorf("tag_pattern is required")
 	}
@@ -149,9 +151,6 @@ func (c *Config) validateApp(name string) (AppRaw, error) {
 	}
 	if parsedURL.Host == "" {
 		return AppRaw{}, fmt.Errorf("health_url must include a host")
-	}
-	if len(raw.ComposeFiles) > 0 {
-		return AppRaw{}, fmt.Errorf("compose_files is no longer supported; use artifact instead")
 	}
 	if raw.Artifact == "" {
 		return AppRaw{}, fmt.Errorf("artifact is required")

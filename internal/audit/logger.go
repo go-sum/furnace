@@ -51,5 +51,8 @@ func (l *FileLogger) Log(_ context.Context, entry model.AuditEntry) error {
 	if _, err := f.Write(data); err != nil {
 		return fmt.Errorf("write audit log: %w", err)
 	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync audit log: %w", err)
+	}
 	return nil
 }

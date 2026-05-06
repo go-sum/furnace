@@ -335,29 +335,6 @@ apps:
 	}
 }
 
-func TestLoadConfig_RejectsComposeFiles(t *testing.T) {
-	path := writeConfig(t, `
-data_dir: "/var/lib/furnace"
-apps:
-  myapp:
-    image: "ghcr.io/org/myapp"
-    tag_pattern: "v*"
-    allowed_identity: "org/myapp"
-    artifact: "ghcr.io/org/myapp:{tag}-compose"
-    domain: "myapp.example.com"
-    health_url: "http://myapp-web-1:8080/healthz"
-    compose_files:
-      - "docker-compose.yml"
-`)
-	_, err := LoadConfig(path)
-	if err == nil {
-		t.Fatal("expected error for compose_files")
-	}
-	want := `app "myapp": compose_files is no longer supported; use artifact instead`
-	if err.Error() != want {
-		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
-	}
-}
 
 func TestLoadConfig_KeepReleasesDefault(t *testing.T) {
 	path := writeConfig(t, validAppYAML("myapp"))
