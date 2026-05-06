@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,7 +17,12 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
+	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
+	protocommon "github.com/sigstore/protobuf-specs/gen/pb-go/common/v1"
+	protorekor "github.com/sigstore/protobuf-specs/gen/pb-go/rekor/v1"
+	"github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/sigstore/sigstore-go/pkg/testing/ca"
+	"github.com/sigstore/sigstore-go/pkg/tlog"
 	"github.com/sigstore/sigstore/pkg/signature/payload"
 
 	"github.com/go-sum/furnace/internal/model"
@@ -318,6 +324,166 @@ func TestVerify_NoMessageSignature(t *testing.T) {
 	if !strings.Contains(err.Error(), "no message signature") {
 		t.Fatalf("expected 'no message signature' in error, got: %v", err)
 	}
+}
+
+// TestVerify_EndToEnd confirms that the full Verify() path succeeds when an
+// OCI referrer carries a real Sigstore bundle in its config blob with the
+// correct artifactType.  This is the scenario produced by
+// `cosign sign --new-bundle-format --registry-referrers-mode=oci-1-1`.
+func TestVerify_EndToEnd(t *testing.T) {
+	srv := httptest.NewServer(registry.New(registry.WithReferrersSupport(true)))
+	t.Cleanup(srv.Close)
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	imgDigest := pushImage(t, srv.URL, "test/app")
+	imageRef := host + "/test/app@" + imgDigest
+
+	vs, err := ca.NewVirtualSigstore()
+	if err != nil {
+		t.Fatalf("NewVirtualSigstore: %v", err)
+	}
+	ref, err := name.NewDigest(imageRef, name.Insecure)
+	if err != nil {
+		t.Fatalf("NewDigest: %v", err)
+	}
+	artifact, err := payload.Cosign{Image: ref}.MarshalJSON()
+	if err != nil {
+		t.Fatalf("MarshalJSON: %v", err)
+	}
+	identity := "https://github.com/test/repo/.github/workflows/release.yml@refs/heads/main"
+	entity, err := vs.Sign(identity, githubOIDCIssuer, artifact)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	bundleJSON := marshalTestEntityBundle(t, vs, entity)
+	pushBundleReferrer(t, srv.URL, "test/app", imgDigest, string(bundleJSON), bundleArtifactType)
+
+	v := NewFromTrustedMaterial(vs, anonKeychain{})
+	v.nameOpts = []name.Option{name.Insecure}
+	if err := v.Verify(context.Background(), imageRef, "test/repo"); err != nil {
+		t.Fatalf("Verify: unexpected error: %v", err)
+	}
+}
+
+// marshalTestEntityBundle converts a *ca.TestEntity to the Sigstore bundle JSON
+// that cosign --new-bundle-format stores as the OCI config blob.
+//
+// The test CA's tlog.Entry.TransparencyLogEntry() returns an incomplete protobuf
+// (no KindVersion).  We reconstruct a complete entry by re-deriving the signed
+// entry timestamp (SET) via vs.RekorSignPayload, which produces the identical
+// bytes as the original signing.  The result is a v0.1 bundle (inclusion
+// promise instead of proof) that passes bundle.NewBundle validation.
+func marshalTestEntityBundle(t *testing.T, vs *ca.VirtualSigstore, entity *ca.TestEntity) []byte {
+	t.Helper()
+
+	sc, err := entity.SignatureContent()
+	if err != nil {
+		t.Fatalf("marshalTestEntityBundle: SignatureContent: %v", err)
+	}
+	ms, ok := sc.(*bundle.MessageSignature)
+	if !ok {
+		t.Fatalf("marshalTestEntityBundle: expected *bundle.MessageSignature, got %T", sc)
+	}
+
+	var hashAlg protocommon.HashAlgorithm
+	switch ms.DigestAlgorithm() {
+	case "SHA2_256":
+		hashAlg = protocommon.HashAlgorithm_SHA2_256
+	case "SHA2_384":
+		hashAlg = protocommon.HashAlgorithm_SHA2_384
+	case "SHA2_512":
+		hashAlg = protocommon.HashAlgorithm_SHA2_512
+	default:
+		t.Fatalf("marshalTestEntityBundle: unknown digest algorithm %q", ms.DigestAlgorithm())
+	}
+
+	vc, err := entity.VerificationContent()
+	if err != nil {
+		t.Fatalf("marshalTestEntityBundle: VerificationContent: %v", err)
+	}
+	cert, ok := vc.(*bundle.Certificate)
+	if !ok {
+		t.Fatalf("marshalTestEntityBundle: expected *bundle.Certificate, got %T", vc)
+	}
+
+	tlogEntries, err := entity.TlogEntries()
+	if err != nil {
+		t.Fatalf("marshalTestEntityBundle: TlogEntries: %v", err)
+	}
+	if len(tlogEntries) == 0 {
+		t.Fatal("marshalTestEntityBundle: no tlog entries")
+	}
+
+	// The tle returned by TransparencyLogEntry() is missing KindVersion (a
+	// limitation of the deprecated NewEntry path used by the test CA).
+	// Re-derive the SET so we can construct a complete, parseable protobuf.
+	incompleteTLE := tlogEntries[0].TransparencyLogEntry()
+	hexLogID := hex.EncodeToString(incompleteTLE.LogId.KeyId)
+	base64Body := base64.StdEncoding.EncodeToString(incompleteTLE.CanonicalizedBody)
+	set, err := vs.RekorSignPayload(tlog.RekorPayload{
+		Body:           base64Body,
+		IntegratedTime: incompleteTLE.IntegratedTime,
+		LogIndex:       incompleteTLE.LogIndex,
+		LogID:          hexLogID,
+	})
+	if err != nil {
+		t.Fatalf("marshalTestEntityBundle: RekorSignPayload: %v", err)
+	}
+
+	completeTLE := &protorekor.TransparencyLogEntry{
+		CanonicalizedBody: incompleteTLE.CanonicalizedBody,
+		LogIndex:          incompleteTLE.LogIndex,
+		LogId:             incompleteTLE.LogId,
+		IntegratedTime:    incompleteTLE.IntegratedTime,
+		KindVersion:       &protorekor.KindVersion{Kind: "hashedrekord", Version: "0.0.1"},
+		InclusionPromise:  &protorekor.InclusionPromise{SignedEntryTimestamp: set},
+	}
+
+	tsBytes, err := entity.Timestamps()
+	if err != nil {
+		t.Fatalf("marshalTestEntityBundle: Timestamps: %v", err)
+	}
+	rfc3161Ts := make([]*protocommon.RFC3161SignedTimestamp, len(tsBytes))
+	for i, ts := range tsBytes {
+		rfc3161Ts[i] = &protocommon.RFC3161SignedTimestamp{SignedTimestamp: ts}
+	}
+
+	pb := &protobundle.Bundle{
+		// Use the v0.1 media type so the bundle validator requires only an
+		// inclusion promise (which we have) rather than an inclusion proof.
+		MediaType: "application/vnd.dev.sigstore.bundle+json;version=0.1",
+		Content: &protobundle.Bundle_MessageSignature{
+			MessageSignature: &protocommon.MessageSignature{
+				MessageDigest: &protocommon.HashOutput{
+					Algorithm: hashAlg,
+					Digest:    ms.Digest(),
+				},
+				Signature: ms.Signature(),
+			},
+		},
+		VerificationMaterial: &protobundle.VerificationMaterial{
+			Content: &protobundle.VerificationMaterial_Certificate{
+				Certificate: &protocommon.X509Certificate{
+					RawBytes: cert.Certificate().Raw,
+				},
+			},
+			TlogEntries: []*protorekor.TransparencyLogEntry{completeTLE},
+			TimestampVerificationData: &protobundle.TimestampVerificationData{
+				Rfc3161Timestamps: rfc3161Ts,
+			},
+		},
+	}
+
+	b, err := bundle.NewBundle(pb)
+	if err != nil {
+		t.Fatalf("marshalTestEntityBundle: NewBundle: %v", err)
+	}
+	data, err := json.Marshal(b)
+	if err != nil {
+		t.Fatalf("marshalTestEntityBundle: Marshal: %v", err)
+	}
+	return data
 }
 
 // --- Registry helpers ---
