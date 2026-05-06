@@ -1,0 +1,11 @@
+.git
+.github
+.decisions
+.claude
+.codex
+*.md
+bin
+furnace
+furnace-web
+furnace-linux-*
+*.bundle

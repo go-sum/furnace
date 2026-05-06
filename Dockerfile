@@ -17,7 +17,7 @@ ARG VERSION=dev
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
-    -ldflags "-s -w" \
+    -ldflags "-s -w -X github.com/go-sum/furnace/cmd/furnace-web.Version=${VERSION}" \
     -o /usr/local/bin/furnace-web ./cmd/furnace-web
 
 # healthcheck_builder: stdlib-only binary, isolated go.mod, no workspace deps.
@@ -26,8 +26,7 @@ WORKDIR /build
 ARG TARGETOS
 ARG TARGETARCH
 COPY docker/healthcheck.go main.go
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
+RUN --mount=type=cache,target=/root/.cache/go-build \
     printf 'module healthcheck\ngo 1.26\n' > go.mod && \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags='-s -w' -o /healthcheck .
 
