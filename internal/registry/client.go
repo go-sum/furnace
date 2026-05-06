@@ -57,7 +57,9 @@ func (c *Client) LatestTag(ctx context.Context, imageRepo, pattern string) (tag,
 	sortTagsDesc(matching)
 	latest := matching[0]
 
-	d, err := crane.Digest(imageRepo+":"+latest, c.craneOpts(ctx)...)
+	digestCtx, digestCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer digestCancel()
+	d, err := crane.Digest(imageRepo+":"+latest, c.craneOpts(digestCtx)...)
 	if err != nil {
 		return "", "", fmt.Errorf("digest for %s:%s: %w", imageRepo, latest, err)
 	}

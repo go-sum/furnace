@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-sum/foundry/pkg/web/serve"
@@ -55,6 +57,23 @@ func TestStatusHandler_UnknownApp(t *testing.T) {
 	}
 	if resp.Status != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", resp.Status)
+	}
+}
+
+func TestStatusHandler_InternalError(t *testing.T) {
+	deployer := &fakeDeployer{err: fmt.Errorf("storage unavailable")}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/apps/myapp/status", nil)
+	c := serve.NewContext(req)
+	c.SetParam("app", "myapp")
+
+	h := NewStatusHandler(deployer)
+	_, err := h.Status(c)
+	if err == nil {
+		t.Fatal("expected handler to return an error")
+	}
+	if !strings.Contains(err.Error(), "get deployment status") {
+		t.Fatalf("expected error to mention 'get deployment status', got: %v", err)
 	}
 }
 

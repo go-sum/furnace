@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/go-sum/foundry/pkg/web"
@@ -27,9 +28,7 @@ func (h *StatusHandler) Status(c *web.Context) (web.Response, error) {
 				"error": "unknown app",
 			}), nil
 		}
-		return web.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "failed to get status",
-		}), nil
+		return web.Response{}, fmt.Errorf("get deployment status: %w", err)
 	}
 
 	if d == nil {

@@ -16,6 +16,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/sigstore/sigstore-go/pkg/testing/ca"
 	"github.com/sigstore/sigstore/pkg/signature/payload"
 
 	"github.com/go-sum/furnace/internal/model"
@@ -30,7 +31,7 @@ func (anonKeychain) Resolve(_ authn.Resource) (authn.Authenticator, error) {
 
 const testDigest = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
-// --- Payload construction & validation (pure unit tests, no network) ---
+// --- Offline verification tests with real signed entities ---
 
 func TestSimpleSigningPayload(t *testing.T) {
 	ref, err := name.NewDigest("ghcr.io/test/repo@" + testDigest)
@@ -47,90 +48,86 @@ func TestSimpleSigningPayload(t *testing.T) {
 	}
 }
 
-func TestValidatePayload_ValidPayload(t *testing.T) {
-	ref, err := name.NewDigest("ghcr.io/test/repo@" + testDigest)
-	if err != nil {
-		t.Fatalf("NewDigest: %v", err)
+func TestVerifyEntity_SucceedsWithMatchingImageRef(t *testing.T) {
+	cases := []string{
+		"ghcr.io/test/repo@" + testDigest,
+		"ghcr.io/test/repo-compose@" + testDigest,
 	}
-	data, err := payload.Cosign{Image: ref}.MarshalJSON()
-	if err != nil {
-		t.Fatalf("MarshalJSON: %v", err)
-	}
-	if err := validatePayload(data, ref); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+
+	for _, imageRef := range cases {
+		v, entity := newSignedVerifierEntity(t, imageRef, "test/repo")
+		if err := v.verifyEntity(imageRef, "test/repo", entity); err != nil {
+			t.Fatalf("verifyEntity(%q): unexpected error: %v", imageRef, err)
+		}
 	}
 }
 
-func TestValidatePayload_WrongDigest(t *testing.T) {
-	ref, err := name.NewDigest("ghcr.io/test/repo@" + testDigest)
-	if err != nil {
-		t.Fatalf("NewDigest: %v", err)
+func TestVerifyEntity_RejectsDigestMismatch(t *testing.T) {
+	imageRef := "ghcr.io/test/repo@" + testDigest
+	v, entity := newSignedVerifierEntity(t, imageRef, "test/repo")
+
+	badRef := "ghcr.io/test/repo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	err := v.verifyEntity(badRef, "test/repo", entity)
+	if !errors.Is(err, model.ErrSignatureInvalid) {
+		t.Fatalf("expected ErrSignatureInvalid, got %v", err)
 	}
-	data, err := payload.Cosign{Image: ref}.MarshalJSON()
-	if err != nil {
-		t.Fatalf("MarshalJSON: %v", err)
-	}
-	otherDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	otherRef, err := name.NewDigest("ghcr.io/test/repo@" + otherDigest)
-	if err != nil {
-		t.Fatalf("NewDigest other: %v", err)
-	}
-	err = validatePayload(data, otherRef)
-	if err == nil {
-		t.Fatal("expected error for wrong digest")
-	}
-	if !strings.Contains(err.Error(), "does not match expected") {
-		t.Fatalf("unexpected error message: %v", err)
+	if !strings.Contains(err.Error(), "could not verify message") {
+		t.Fatalf("expected signature verification failure, got: %v", err)
 	}
 }
 
-func TestValidatePayload_WrongIdentity(t *testing.T) {
-	ref, err := name.NewDigest("ghcr.io/test/repo@" + testDigest)
-	if err != nil {
-		t.Fatalf("NewDigest: %v", err)
+func TestVerifyEntity_RejectsRepositoryMismatch(t *testing.T) {
+	imageRef := "ghcr.io/test/repo@" + testDigest
+	v, entity := newSignedVerifierEntity(t, imageRef, "test/repo")
+
+	badRef := "ghcr.io/other/repo@" + testDigest
+	err := v.verifyEntity(badRef, "test/repo", entity)
+	if !errors.Is(err, model.ErrSignatureInvalid) {
+		t.Fatalf("expected ErrSignatureInvalid, got %v", err)
 	}
-	data, err := payload.Cosign{Image: ref}.MarshalJSON()
-	if err != nil {
-		t.Fatalf("MarshalJSON: %v", err)
-	}
-	otherRef, err := name.NewDigest("ghcr.io/other/repo@" + testDigest)
-	if err != nil {
-		t.Fatalf("NewDigest other: %v", err)
-	}
-	err = validatePayload(data, otherRef)
-	if err == nil {
-		t.Fatal("expected error for wrong identity")
-	}
-	if !strings.Contains(err.Error(), "does not match expected") {
-		t.Fatalf("unexpected error message: %v", err)
+	if !strings.Contains(err.Error(), "could not verify message") {
+		t.Fatalf("expected signature verification failure, got: %v", err)
 	}
 }
 
-func TestValidatePayload_InvalidType(t *testing.T) {
-	badPayload := `{"critical":{"identity":{"docker-reference":"ghcr.io/test/repo"},"image":{"docker-manifest-digest":"` + testDigest + `"},"type":"wrong type"},"optional":null}`
-	ref, err := name.NewDigest("ghcr.io/test/repo@" + testDigest)
+func TestVerifyEntity_RejectsIdentityMismatch(t *testing.T) {
+	imageRef := "ghcr.io/test/repo@" + testDigest
+	v, entity := newSignedVerifierEntity(t, imageRef, "test/repo")
+
+	err := v.verifyEntity(imageRef, "other/repo", entity)
+	if !errors.Is(err, model.ErrSignatureInvalid) {
+		t.Fatalf("expected ErrSignatureInvalid, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "no matching CertificateIdentity") {
+		t.Fatalf("expected certificate identity failure, got: %v", err)
+	}
+}
+
+func newSignedVerifierEntity(t *testing.T, imageRef, allowedIdentity string) (*Verifier, *ca.TestEntity) {
+	t.Helper()
+
+	ref, err := name.NewDigest(imageRef)
 	if err != nil {
 		t.Fatalf("NewDigest: %v", err)
 	}
-	err = validatePayload([]byte(badPayload), ref)
-	if err == nil {
-		t.Fatal("expected error for invalid type")
+	artifact, err := payload.Cosign{Image: ref}.MarshalJSON()
+	if err != nil {
+		t.Fatalf("MarshalJSON: %v", err)
 	}
-	if !strings.Contains(err.Error(), "payload content mismatch") {
-		t.Fatalf("unexpected error message: %v", err)
+
+	vs, err := ca.NewVirtualSigstore()
+	if err != nil {
+		t.Fatalf("NewVirtualSigstore: %v", err)
 	}
+	identity := "https://github.com/" + allowedIdentity + "/.github/workflows/release.yml@refs/heads/main"
+	entity, err := vs.Sign(identity, githubOIDCIssuer, artifact)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	return NewFromTrustedMaterial(vs, anonKeychain{}), entity
 }
 
 // --- Bundle fetching (in-memory OCI registry) ---
-
-func newTestVerifier(t *testing.T, srv *httptest.Server) *Verifier {
-	t.Helper()
-	host := strings.TrimPrefix(srv.URL, "http://")
-	v := NewFromTrustedMaterial(nil, anonKeychain{})
-	v.nameOpts = []name.Option{name.Insecure}
-	_ = host
-	return v
-}
 
 func TestFetchBundle_InvalidImageRef(t *testing.T) {
 	v := NewFromTrustedMaterial(nil, anonKeychain{})
@@ -244,8 +241,8 @@ func TestVerify_InvalidImageRef(t *testing.T) {
 	if !errors.Is(err, model.ErrSignatureInvalid) {
 		t.Fatalf("expected ErrSignatureInvalid, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "parse image ref") {
-		t.Fatalf("expected 'parse image ref' in error, got: %v", err)
+	if !strings.Contains(err.Error(), "parse digest ref") {
+		t.Fatalf("expected fetch-path digest parse error, got: %v", err)
 	}
 }
 
@@ -291,20 +288,30 @@ func TestVerify_MalformedBundleJSON(t *testing.T) {
 }
 
 func TestVerify_NoMessageSignature(t *testing.T) {
-	srv := httptest.NewServer(registry.New(registry.WithReferrersSupport(true)))
-	t.Cleanup(srv.Close)
-	host := strings.TrimPrefix(srv.URL, "http://")
+	imageRef := "ghcr.io/test/repo@" + testDigest
+	ref, err := name.NewDigest(imageRef)
+	if err != nil {
+		t.Fatalf("NewDigest: %v", err)
+	}
+	artifact, err := payload.Cosign{Image: ref}.MarshalJSON()
+	if err != nil {
+		t.Fatalf("MarshalJSON: %v", err)
+	}
+	vs, err := ca.NewVirtualSigstore()
+	if err != nil {
+		t.Fatalf("NewVirtualSigstore: %v", err)
+	}
+	statement, err := json.Marshal(map[string]any{"signed": string(artifact)})
+	if err != nil {
+		t.Fatalf("Marshal statement: %v", err)
+	}
+	entity, err := vs.Attest("https://github.com/test/repo/.github/workflows/release.yml@refs/heads/main", githubOIDCIssuer, statement)
+	if err != nil {
+		t.Fatalf("Attest: %v", err)
+	}
+	v := NewFromTrustedMaterial(vs, anonKeychain{})
 
-	imgDigest := pushImage(t, srv.URL, "test/app")
-	// A bundle with a DSSE envelope (no messageSignature) that passes validate().
-	dsseBundle := `{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json","verificationMaterial":{"publicKey":{"hint":"test"}},"dsseEnvelope":{}}`
-	pushBundleReferrer(t, srv.URL, "test/app", imgDigest, dsseBundle, bundleArtifactType)
-	imageRef := host + "/test/app@" + imgDigest
-
-	v := NewFromTrustedMaterial(nil, anonKeychain{})
-	v.nameOpts = []name.Option{name.Insecure}
-
-	err := v.Verify(context.Background(), imageRef, "org/repo")
+	err = v.verifyEntity(imageRef, "test/repo", entity)
 	if !errors.Is(err, model.ErrSignatureInvalid) {
 		t.Fatalf("expected ErrSignatureInvalid, got %v", err)
 	}

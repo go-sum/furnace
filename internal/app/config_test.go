@@ -3,6 +3,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -397,6 +398,21 @@ apps:
 	want := `app "myapp": keep_releases must be at least 1`
 	if err.Error() != want {
 		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
+	}
+}
+
+func TestLoadConfig_RejectsUnknownFields(t *testing.T) {
+	path := writeConfig(t, `
+data_dir: "/var/lib/furnace"
+alowed_identity: "typo-field"
+apps: {}
+`)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for unknown field")
+	}
+	if !strings.Contains(err.Error(), "parse config") {
+		t.Fatalf("expected 'parse config' in error, got: %v", err)
 	}
 }
 

@@ -3,7 +3,6 @@ package verify
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"regexp"
@@ -68,11 +67,6 @@ func NewFromTrustedMaterial(tm root.TrustedMaterial, keychain authn.Keychain) *V
 //
 // imageRef must be a digest-addressed reference: ghcr.io/org/repo@sha256:abc…
 func (v *Verifier) Verify(ctx context.Context, imageRef, allowedIdentity string) error {
-	digestRef, err := name.NewDigest(imageRef, v.nameOpts...)
-	if err != nil {
-		return fmt.Errorf("%w: parse image ref: %v", model.ErrSignatureInvalid, err)
-	}
-
 	bundleJSON, err := v.fetchBundle(ctx, imageRef)
 	if err != nil {
 		return fmt.Errorf("%w: %v", model.ErrSignatureInvalid, err)
@@ -82,8 +76,20 @@ func (v *Verifier) Verify(ctx context.Context, imageRef, allowedIdentity string)
 	if err := b.UnmarshalJSON(bundleJSON); err != nil {
 		return fmt.Errorf("%w: parse bundle: %v", model.ErrSignatureInvalid, err)
 	}
+	return v.verifyEntity(imageRef, allowedIdentity, b)
+}
 
-	if b.GetMessageSignature() == nil {
+func (v *Verifier) verifyEntity(imageRef, allowedIdentity string, entity sgverify.SignedEntity) error {
+	digestRef, err := name.NewDigest(imageRef, v.nameOpts...)
+	if err != nil {
+		return fmt.Errorf("%w: parse image ref: %v", model.ErrSignatureInvalid, err)
+	}
+
+	sigContent, err := entity.SignatureContent()
+	if err != nil {
+		return fmt.Errorf("%w: read signature content: %v", model.ErrSignatureInvalid, err)
+	}
+	if sigContent.MessageSignatureContent() == nil {
 		return fmt.Errorf("%w: bundle has no message signature", model.ErrSignatureInvalid)
 	}
 
@@ -111,31 +117,8 @@ func (v *Verifier) Verify(ctx context.Context, imageRef, allowedIdentity string)
 		sgverify.WithCertificateIdentity(identity),
 	)
 
-	if _, err := sv.Verify(b, policy); err != nil {
+	if _, err := sv.Verify(entity, policy); err != nil {
 		return fmt.Errorf("%w: %v", model.ErrSignatureInvalid, err)
-	}
-
-	if err := validatePayload(expectedPayload, digestRef); err != nil {
-		return fmt.Errorf("%w: %v", model.ErrSignatureInvalid, err)
-	}
-	return nil
-}
-
-// validatePayload confirms that the cosign payload JSON encodes the expected
-// image digest and repository identity. This provides a defence-in-depth check
-// after the cryptographic verification.
-func validatePayload(data []byte, ref name.Digest) error {
-	var p payload.Cosign
-	if err := json.Unmarshal(data, &p); err != nil {
-		return fmt.Errorf("payload content mismatch: %v", err)
-	}
-	if p.Image.DigestStr() != ref.DigestStr() {
-		return fmt.Errorf("payload digest %s does not match expected %s",
-			p.Image.DigestStr(), ref.DigestStr())
-	}
-	if p.ClaimedIdentity != ref.Context().Name() {
-		return fmt.Errorf("payload identity %q does not match expected %q",
-			p.ClaimedIdentity, ref.Context().Name())
 	}
 	return nil
 }
@@ -174,12 +157,18 @@ func (v *Verifier) fetchBundle(ctx context.Context, imageRef string) ([]byte, er
 			return nil, fmt.Errorf("fetch bundle artifact: %w", err)
 		}
 		// cosign stores the bundle JSON as the OCI image config blob.
+		// Check the manifest descriptor size before fetching the blob to prevent
+		// a malicious registry from exhausting worker memory with an oversized config.
+		bundleMF, err := bundleImg.Manifest()
+		if err != nil {
+			return nil, fmt.Errorf("read bundle manifest: %w", err)
+		}
+		if bundleMF.Config.Size > 1<<20 {
+			return nil, fmt.Errorf("bundle config exceeds size limit")
+		}
 		data, err := bundleImg.RawConfigFile()
 		if err != nil {
 			return nil, fmt.Errorf("read bundle config: %w", err)
-		}
-		if len(data) > 1<<20 {
-			return nil, fmt.Errorf("bundle config exceeds size limit")
 		}
 		if len(data) > 0 && data[0] == '{' {
 			return data, nil

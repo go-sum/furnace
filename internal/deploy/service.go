@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -157,6 +158,7 @@ func (s *Service) execute(app model.AppConfig, deployment *model.Deployment, rel
 				"app", deployment.AppName,
 				"deployment_id", deployment.ID,
 				"panic", r,
+				"stack", string(debug.Stack()),
 			)
 			ctx := context.Background()
 			deployment.Status = model.StatusFailed

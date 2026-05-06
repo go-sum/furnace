@@ -68,7 +68,7 @@ func (h *HTTPHealthChecker) probe(ctx context.Context, url string) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("health check returned status %d", resp.StatusCode)

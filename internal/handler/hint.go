@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,10 +27,10 @@ func (h *HintHandler) Hint(c *web.Context) (web.Response, error) {
 
 	hintDir := filepath.Join(h.dataDir, "hints")
 	if err := os.MkdirAll(hintDir, 0750); err != nil {
-		return web.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to write hint"}), nil
+		return web.Response{}, fmt.Errorf("create hint dir: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(hintDir, appName), nil, 0640); err != nil {
-		return web.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to write hint"}), nil
+		return web.Response{}, fmt.Errorf("write hint file: %w", err)
 	}
 
 	return web.JSON(http.StatusAccepted, map[string]string{"status": "ok"}), nil

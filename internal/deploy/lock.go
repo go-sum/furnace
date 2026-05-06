@@ -19,6 +19,8 @@ type FileLock struct {
 }
 
 func NewFileLock(dir string) *FileLock {
+	// Best-effort: if the directory cannot be created, Acquire will surface a
+	// clear "open lock file" error at the first deployment attempt.
 	os.MkdirAll(dir, 0750)
 	return &FileLock{dir: dir}
 }
@@ -37,13 +39,15 @@ func (l *FileLock) Acquire(_ context.Context, appName string) (func(), error) {
 		return nil, model.ErrDeploymentInProgress
 	}
 
-	_ = f.Truncate(0)
+	_ = f.Truncate(0) // best-effort: PID is advisory; lock is held via flock
 	fmt.Fprintf(f, "%d\n", os.Getpid())
 
+	// best-effort cleanup: lock release errors are non-fatal; the flock kernel
+	// object is released when the fd is closed regardless.
 	release := func() {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
-		os.Remove(path)
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck
+		f.Close()                                    //nolint:errcheck
+		os.Remove(path)                              //nolint:errcheck
 	}
 
 	return release, nil

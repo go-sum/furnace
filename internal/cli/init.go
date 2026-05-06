@@ -161,7 +161,7 @@ func ensureConfigScaffold(gid int) error {
 	const configPath = "/etc/furnace/furnace.yaml"
 	if _, err := os.Stat(configPath); err == nil {
 		fmt.Printf("exists   %s (not overwritten)\n", configPath)
-		_ = os.Chown(configPath, 0, gid)
+		_ = os.Chown(configPath, 0, gid) // best-effort: file already exists; ownership adjustment is advisory
 		return nil
 	}
 	if err := os.WriteFile(configPath, furnaceconfig.ExampleConfig, 0640); err != nil {

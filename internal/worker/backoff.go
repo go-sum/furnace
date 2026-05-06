@@ -11,9 +11,9 @@ type backoff struct {
 // using exponential backoff capped at 10× base.
 func (b *backoff) record(base time.Duration) {
 	b.failures++
-	multiplier := 1 << (b.failures - 1) // 1, 2, 4, 8, 16, ...
-	if multiplier > 10 {
-		multiplier = 10
+	multiplier := 10
+	if b.failures <= 4 {
+		multiplier = 1 << (b.failures - 1) // 1, 2, 4, 8
 	}
 	b.nextPoll = time.Now().Add(time.Duration(multiplier) * base)
 }

@@ -34,6 +34,8 @@ func runReset() error {
 		return fmt.Errorf("reset cancelled")
 	}
 
+	// Best-effort teardown: each step is independent and may already be absent.
+	// Errors are non-fatal — the goal is to remove as much state as possible.
 	_ = exec.Command("systemctl", "stop", "furnace-worker").Run()
 	fmt.Println("stopped  furnace-worker")
 
