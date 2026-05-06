@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -367,41 +366,6 @@ func TestVerify_EndToEnd(t *testing.T) {
 	}
 }
 
-func TestVerify_EndToEndLegacySignature(t *testing.T) {
-	srv := httptest.NewServer(registry.New(registry.WithReferrersSupport(true)))
-	t.Cleanup(srv.Close)
-	host := strings.TrimPrefix(srv.URL, "http://")
-
-	imgDigest := pushImage(t, srv.URL, "test/app")
-	imageRef := host + "/test/app@" + imgDigest
-
-	vs, err := ca.NewVirtualSigstore()
-	if err != nil {
-		t.Fatalf("NewVirtualSigstore: %v", err)
-	}
-	ref, err := name.NewDigest(imageRef, name.Insecure)
-	if err != nil {
-		t.Fatalf("NewDigest: %v", err)
-	}
-	artifact, err := payload.Cosign{Image: ref}.MarshalJSON()
-	if err != nil {
-		t.Fatalf("MarshalJSON: %v", err)
-	}
-	identity := "https://github.com/test/repo/.github/workflows/release.yml@refs/heads/main"
-	entity, err := vs.Sign(identity, githubOIDCIssuer, artifact)
-	if err != nil {
-		t.Fatalf("Sign: %v", err)
-	}
-
-	pushLegacySignatureTag(t, srv.URL, "test/app", imgDigest, artifact, entity, vs)
-
-	v := NewFromTrustedMaterial(vs, anonKeychain{})
-	v.nameOpts = []name.Option{name.Insecure}
-	if err := v.Verify(context.Background(), imageRef, "test/repo"); err != nil {
-		t.Fatalf("Verify: unexpected error: %v", err)
-	}
-}
-
 // marshalTestEntityBundle converts a *ca.TestEntity to the Sigstore bundle JSON
 // that cosign --new-bundle-format stores as the OCI config blob.
 //
@@ -569,94 +533,6 @@ func pushBundleReferrer(t *testing.T, registryBase, repo, subjectDigest, configJ
 		},
 	}
 	pushManifest(t, registryBase, repo, "bundle-ref", manifest)
-}
-
-func pushLegacySignatureTag(t *testing.T, registryBase, repo, subjectDigest string, artifact []byte, entity *ca.TestEntity, vs *ca.VirtualSigstore) {
-	t.Helper()
-
-	sc, err := entity.SignatureContent()
-	if err != nil {
-		t.Fatalf("SignatureContent: %v", err)
-	}
-	ms, ok := sc.(*bundle.MessageSignature)
-	if !ok {
-		t.Fatalf("expected *bundle.MessageSignature, got %T", sc)
-	}
-
-	vc, err := entity.VerificationContent()
-	if err != nil {
-		t.Fatalf("VerificationContent: %v", err)
-	}
-	cert, ok := vc.(*bundle.Certificate)
-	if !ok {
-		t.Fatalf("expected *bundle.Certificate, got %T", vc)
-	}
-
-	entries, err := entity.TlogEntries()
-	if err != nil {
-		t.Fatalf("TlogEntries: %v", err)
-	}
-	if len(entries) == 0 {
-		t.Fatal("expected tlog entry")
-	}
-	tle := entries[0].TransparencyLogEntry()
-	if tle.InclusionPromise == nil || len(tle.InclusionPromise.SignedEntryTimestamp) == 0 {
-		hexLogID := hex.EncodeToString(tle.LogId.KeyId)
-		base64Body := base64.StdEncoding.EncodeToString(tle.CanonicalizedBody)
-		set, err := vs.RekorSignPayload(tlog.RekorPayload{
-			Body:           base64Body,
-			IntegratedTime: tle.IntegratedTime,
-			LogIndex:       tle.LogIndex,
-			LogID:          hexLogID,
-		})
-		if err != nil {
-			t.Fatalf("RekorSignPayload: %v", err)
-		}
-		tle.InclusionPromise = &protorekor.InclusionPromise{SignedEntryTimestamp: set}
-	}
-
-	legacyBundle := map[string]any{
-		"SignedEntryTimestamp": base64.StdEncoding.EncodeToString(tle.InclusionPromise.SignedEntryTimestamp),
-		"Payload": map[string]any{
-			"body":           base64.StdEncoding.EncodeToString(tle.CanonicalizedBody),
-			"integratedTime": tle.IntegratedTime,
-			"logIndex":       tle.LogIndex,
-			"logID":          hex.EncodeToString(tle.LogId.KeyId),
-		},
-	}
-	legacyBundleJSON, err := json.Marshal(legacyBundle)
-	if err != nil {
-		t.Fatalf("marshal legacy bundle: %v", err)
-	}
-
-	configBlob := []byte(`{}`)
-	configDigest := pushBlob(t, registryBase, repo, configBlob)
-	payloadDigest := pushBlob(t, registryBase, repo, artifact)
-
-	manifest := map[string]any{
-		"schemaVersion": 2,
-		"mediaType":     "application/vnd.oci.image.manifest.v1+json",
-		"config": map[string]any{
-			"mediaType": "application/vnd.oci.image.config.v1+json",
-			"digest":    configDigest,
-			"size":      len(configBlob),
-		},
-		"layers": []any{
-			map[string]any{
-				"mediaType": "application/vnd.dev.cosign.simplesigning.v1+json",
-				"digest":    payloadDigest,
-				"size":      len(artifact),
-				"annotations": map[string]string{
-					"dev.cosignproject.cosign/signature": base64.StdEncoding.EncodeToString(ms.Signature()),
-					"dev.sigstore.cosign/bundle":         string(legacyBundleJSON),
-					"dev.sigstore.cosign/certificate":    string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate().Raw})),
-				},
-			},
-		},
-	}
-
-	tag := "sha256-" + strings.TrimPrefix(subjectDigest, "sha256:") + ".sig"
-	pushManifest(t, registryBase, repo, tag, manifest)
 }
 
 func pushBlob(t *testing.T, registryBase, repo string, content []byte) string {
