@@ -65,6 +65,7 @@ func newWorkerRunCmd(configPath *string) *cobra.Command {
 			}
 
 			var keychain authn.Keychain
+			var extraEnv []string
 			var executor *deploy.DockerExecutor
 			if token != "" {
 				keychain = creds.TokenKeychain(token)
@@ -73,18 +74,14 @@ func newWorkerRunCmd(configPath *string) *cobra.Command {
 					return fmt.Errorf("create docker config: %w", err)
 				}
 				defer creds.RemoveDockerConfigDir(dockerConfigDir)
-				executor = deploy.NewDockerExecutorWithEnv([]string{"DOCKER_CONFIG=" + dockerConfigDir})
+				extraEnv = []string{"DOCKER_CONFIG=" + dockerConfigDir}
+				executor = deploy.NewDockerExecutorWithEnv(extraEnv)
 			} else {
 				executor = deploy.NewDockerExecutor()
 			}
 
 			reg := registry.NewClient(keychain)
-
-			verifier, err := verify.New(filepath.Join(cfg.DataDir, "sigstore-tuf"), keychain)
-			if err != nil {
-				return fmt.Errorf("init sigstore verifier: %w", err)
-			}
-
+			verifier := verify.NewCLI(extraEnv)
 			composeFetcher := deploy.NewArtifactFetcher(verifier, keychain)
 			releases := deploy.NewReleaseManager(logger)
 

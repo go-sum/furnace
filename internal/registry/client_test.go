@@ -56,10 +56,10 @@ func TestParseSemver(t *testing.T) {
 		want  semver
 		ok    bool
 	}{
-		{"v1.2.3", semver{1, 2, 3, ""}, true},
-		{"v10.0.0", semver{10, 0, 0, ""}, true},
-		{"v1.2.3-rc1", semver{1, 2, 3, "rc1"}, true}, // pre-release captured
-		{"1.2.3", semver{1, 2, 3, ""}, true},          // no leading v
+		{"v1.2.3", semver{Major: 1, Minor: 2, Patch: 3}, true},
+		{"v10.0.0", semver{Major: 10, Minor: 0, Patch: 0}, true},
+		{"v1.2.3-rc1", semver{Major: 1, Minor: 2, Patch: 3, Prerelease: "rc1"}, true},
+		{"1.2.3", semver{Major: 1, Minor: 2, Patch: 3}, true},
 		{"latest", semver{}, false},
 		{"v1.2", semver{}, false},
 	}
@@ -82,16 +82,16 @@ func TestCompareSemver(t *testing.T) {
 		a, b semver
 		want int
 	}{
-		{semver{2, 0, 0, ""}, semver{1, 0, 0, ""}, 1},
-		{semver{1, 0, 0, ""}, semver{2, 0, 0, ""}, -1},
-		{semver{1, 2, 3, ""}, semver{1, 2, 3, ""}, 0},
-		{semver{1, 10, 0, ""}, semver{1, 9, 0, ""}, 1},
-		{semver{1, 0, 5, ""}, semver{1, 0, 3, ""}, 1},
+		{semver{Major: 2, Minor: 0, Patch: 0}, semver{Major: 1, Minor: 0, Patch: 0}, 1},
+		{semver{Major: 1, Minor: 0, Patch: 0}, semver{Major: 2, Minor: 0, Patch: 0}, -1},
+		{semver{Major: 1, Minor: 2, Patch: 3}, semver{Major: 1, Minor: 2, Patch: 3}, 0},
+		{semver{Major: 1, Minor: 10, Patch: 0}, semver{Major: 1, Minor: 9, Patch: 0}, 1},
+		{semver{Major: 1, Minor: 0, Patch: 5}, semver{Major: 1, Minor: 0, Patch: 3}, 1},
 		// Release > pre-release at same version numbers.
-		{semver{1, 0, 0, ""}, semver{1, 0, 0, "rc1"}, 1},
-		{semver{1, 0, 0, "rc1"}, semver{1, 0, 0, ""}, -1},
+		{semver{Major: 1, Minor: 0, Patch: 0}, semver{Major: 1, Minor: 0, Patch: 0, Prerelease: "rc1"}, 1},
+		{semver{Major: 1, Minor: 0, Patch: 0, Prerelease: "rc1"}, semver{Major: 1, Minor: 0, Patch: 0}, -1},
 		// Lexicographic among pre-releases.
-		{semver{1, 0, 0, "rc2"}, semver{1, 0, 0, "rc1"}, 1},
+		{semver{Major: 1, Minor: 0, Patch: 0, Prerelease: "rc2"}, semver{Major: 1, Minor: 0, Patch: 0, Prerelease: "rc1"}, 1},
 	}
 	for _, tc := range cases {
 		got := compareSemver(tc.a, tc.b)

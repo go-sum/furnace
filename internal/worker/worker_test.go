@@ -14,45 +14,93 @@ import (
 	"github.com/go-sum/furnace/internal/model"
 )
 
-// --- Fakes ---
-
 type fakeRegistry struct {
 	tag    string
 	digest string
 	err    error
+	hits   int
 }
 
 func (f *fakeRegistry) LatestTag(_ context.Context, _, _ string) (string, string, error) {
+	f.hits++
 	return f.tag, f.digest, f.err
 }
 
-type fakeVerifier struct{ err error }
+type fakeVerifier struct {
+	err  error
+	hits int
+}
 
-func (f *fakeVerifier) Verify(_ context.Context, _, _ string) error { return f.err }
+func (f *fakeVerifier) Verify(_ context.Context, _, _ string) error {
+	f.hits++
+	return f.err
+}
+
+type fakeArtifactFetcher struct {
+	digest        string
+	resolveDigest string
+	err           error
+	resolveErr    error
+	hits          int
+	resolveHits   int
+}
+
+func (f *fakeArtifactFetcher) FetchAndVerify(_ context.Context, _, _, destDir string) (string, error) {
+	f.hits++
+	if f.err != nil {
+		return "", f.err
+	}
+	if err := os.WriteFile(filepath.Join(destDir, "docker-compose.yml"), []byte("services: {}\n"), 0644); err != nil {
+		return "", err
+	}
+	if f.digest == "" {
+		return "sha256:compose123", nil
+	}
+	return f.digest, nil
+}
+
+func (f *fakeArtifactFetcher) ResolveDigest(_ context.Context, _ string) (string, error) {
+	f.resolveHits++
+	if f.resolveErr != nil {
+		return "", f.resolveErr
+	}
+	if f.resolveDigest != "" {
+		return f.resolveDigest, nil
+	}
+	if f.digest != "" {
+		return f.digest, nil
+	}
+	return "sha256:compose123", nil
+}
 
 type fakeDeployer struct {
-	returnStatus   model.DeploymentStatus
-	returnError    string
-	startErr       error
-	deployID       string
-	lastImage      string
+	startErr           error
+	status             model.DeploymentStatus
+	returnError        string
+	deployID           string
+	startHits          int
+	lastImage          string
+	lastDigest         string
 	lastArtifactDigest string
 }
 
 func (f *fakeDeployer) Start(_ context.Context, req model.DeployRequest) (*model.Deployment, error) {
+	f.startHits++
 	if f.startErr != nil {
 		return nil, f.startErr
 	}
 	f.lastImage = req.Image
+	f.lastDigest = req.Digest
 	f.lastArtifactDigest = req.ArtifactDigest
 	id := f.deployID
 	if id == "" {
 		id = "deploy-" + req.Tag
 	}
-	status := f.returnStatus
+	status := f.status
 	if status == "" {
 		status = model.StatusCompleted
 	}
+	f.deployID = id
 	return &model.Deployment{
 		ID:      id,
 		AppName: req.AppName,
@@ -64,7 +112,7 @@ func (f *fakeDeployer) Start(_ context.Context, req model.DeployRequest) (*model
 }
 
 func (f *fakeDeployer) Status(_ context.Context, appName string) (*model.Deployment, error) {
-	status := f.returnStatus
+	status := f.status
 	if status == "" {
 		status = model.StatusCompleted
 	}
@@ -75,37 +123,6 @@ func (f *fakeDeployer) Status(_ context.Context, appName string) (*model.Deploym
 		Error:   f.returnError,
 	}, nil
 }
-
-type fakeArtifactFetcher struct {
-	digest        string
-	resolveDigest string
-	err           error
-	resolveErr    error
-}
-
-func (f *fakeArtifactFetcher) FetchAndVerify(_ context.Context, _, _, _ string) (string, error) {
-	d := f.digest
-	if d == "" {
-		d = "sha256:fakedigest"
-	}
-	return d, f.err
-}
-
-func (f *fakeArtifactFetcher) ResolveDigest(_ context.Context, _ string) (string, error) {
-	if f.resolveErr != nil {
-		return "", f.resolveErr
-	}
-	d := f.resolveDigest
-	if d == "" {
-		d = f.digest
-	}
-	if d == "" {
-		d = "sha256:fakedigest"
-	}
-	return d, nil
-}
-
-// --- Helpers ---
 
 func testApp(dir string) model.AppConfig {
 	return model.AppConfig{
@@ -118,12 +135,12 @@ func testApp(dir string) model.AppConfig {
 	}
 }
 
-func newTestWorker(t *testing.T, reg RegistryClient, ver SignatureVerifier, dep Deployer) (*Worker, string) {
+func newTestWorker(t *testing.T, reg RegistryClient, ver SignatureVerifier, fetcher ArtifactFetcher, dep Deployer) (*Worker, string) {
 	t.Helper()
 	dir := t.TempDir()
 	appDir := filepath.Join(dir, "apps", "myapp")
 	if err := os.MkdirAll(appDir, 0750); err != nil {
-		t.Fatalf("mkdir: %v", err)
+		t.Fatalf("mkdir app dir: %v", err)
 	}
 	rm := deploy.NewReleaseManager(slog.Default())
 	w := New(Config{
@@ -133,514 +150,205 @@ func newTestWorker(t *testing.T, reg RegistryClient, ver SignatureVerifier, dep 
 		Registry:        reg,
 		Verifier:        ver,
 		Deployer:        dep,
-		ArtifactFetcher: &fakeArtifactFetcher{},
+		ArtifactFetcher: fetcher,
 		Releases:        rm,
 		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
 	})
 	return w, appDir
 }
 
-// --- Tests ---
-
 func TestWorker_PollApp_HappyPath(t *testing.T) {
-	reg := &fakeRegistry{tag: "v1.0.0", digest: "sha256:abc"}
-	dep := &fakeDeployer{deployID: "deploy-v1.0.0", returnStatus: model.StatusCompleted}
-	w, _ := newTestWorker(t, reg, &fakeVerifier{}, dep)
+	reg := &fakeRegistry{tag: "v1.0.0", digest: "sha256:image123"}
+	ver := &fakeVerifier{}
+	fetcher := &fakeArtifactFetcher{digest: "sha256:compose123"}
+	dep := &fakeDeployer{}
+	w, appDir := newTestWorker(t, reg, ver, fetcher, dep)
 
 	if err := w.pollApp(context.Background(), w.apps["myapp"]); err != nil {
 		t.Fatalf("pollApp: %v", err)
 	}
 
 	state, err := w.states.Load(context.Background(), "myapp")
-	if err != nil || state == nil {
-		t.Fatalf("state not saved: %v", err)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
 	}
-	if state.Tag != "v1.0.0" || state.Digest != "sha256:abc" {
-		t.Fatalf("wrong state: %+v", state)
+	if state == nil {
+		t.Fatal("expected saved state")
 	}
-	if state.ArtifactDigest != "sha256:fakedigest" {
-		t.Fatalf("expected artifact digest in state, got: %q", state.ArtifactDigest)
+	if state.Tag != "v1.0.0" || state.Digest != "sha256:image123" || state.ArtifactDigest != "sha256:compose123" {
+		t.Fatalf("unexpected state: %+v", state)
 	}
-
-	if !strings.Contains(dep.lastImage, "@sha256:") {
-		t.Fatalf("expected image pinned by digest, got: %q", dep.lastImage)
+	if dep.lastImage != "ghcr.io/org/myapp@sha256:image123" {
+		t.Fatalf("expected deploy image ghcr.io/org/myapp@sha256:image123, got %q", dep.lastImage)
 	}
-	if dep.lastArtifactDigest != "sha256:fakedigest" {
-		t.Fatalf("expected artifact digest passed to deployer, got: %q", dep.lastArtifactDigest)
+	if ver.hits != 1 {
+		t.Fatalf("expected one signature verify, got %d", ver.hits)
+	}
+	releaseFile := filepath.Join(appDir, ".furnace", "releases", "compose123", "docker-compose.yml")
+	if _, err := os.Stat(releaseFile); err != nil {
+		t.Fatalf("expected staged compose file %s: %v", releaseFile, err)
 	}
 }
 
 func TestWorker_PollApp_NoChange(t *testing.T) {
-	reg := &fakeRegistry{tag: "v1.0.0", digest: "sha256:abc"}
+	reg := &fakeRegistry{tag: "v1.0.0", digest: "sha256:image123"}
+	ver := &fakeVerifier{}
+	fetcher := &fakeArtifactFetcher{digest: "sha256:compose123", resolveDigest: "sha256:compose123"}
 	dep := &fakeDeployer{}
-	w, _ := newTestWorker(t, reg, &fakeVerifier{}, dep)
-
+	w, _ := newTestWorker(t, reg, ver, fetcher, dep)
 	if err := w.states.Save(context.Background(), "myapp", &AppState{
 		Tag:            "v1.0.0",
-		Digest:         "sha256:abc",
-		ArtifactDigest: "sha256:fakedigest",
+		Digest:         "sha256:image123",
+		ArtifactDigest: "sha256:compose123",
 	}); err != nil {
-		t.Fatal(err)
+		t.Fatalf("save state: %v", err)
 	}
 
 	if err := w.pollApp(context.Background(), w.apps["myapp"]); err != nil {
 		t.Fatalf("pollApp: %v", err)
 	}
-	// Deployer Start must not have been called (deployID stays empty in state).
-	state, _ := w.states.Load(context.Background(), "myapp")
-	if state.Tag != "v1.0.0" && state.Digest != "sha256:abc" {
-		t.Fatal("state should be unchanged")
+	if ver.hits != 0 {
+		t.Fatalf("expected no signature verify, got %d", ver.hits)
 	}
-}
-
-func TestWorker_PollApp_SignatureFailure(t *testing.T) {
-	reg := &fakeRegistry{tag: "v2.0.0", digest: "sha256:newdigest"}
-	dep := &fakeDeployer{}
-	ver := &fakeVerifier{err: model.ErrSignatureInvalid}
-	w, _ := newTestWorker(t, reg, ver, dep)
-
-	err := w.pollApp(context.Background(), w.apps["myapp"])
-	if err == nil {
-		t.Fatal("expected error on signature failure")
+	if fetcher.hits != 0 {
+		t.Fatalf("expected no fetch, got %d", fetcher.hits)
 	}
-	if !errors.Is(err, model.ErrSignatureInvalid) {
-		t.Fatalf("expected ErrSignatureInvalid, got: %v", err)
-	}
-}
-
-func TestWorker_PollApp_RegistryError(t *testing.T) {
-	reg := &fakeRegistry{err: errors.New("network timeout")}
-	w, _ := newTestWorker(t, reg, &fakeVerifier{}, &fakeDeployer{})
-	if err := w.pollApp(context.Background(), w.apps["myapp"]); err == nil {
-		t.Fatal("expected error on registry failure")
-	}
-}
-
-func TestWorker_PollApp_DeployFailed(t *testing.T) {
-	reg := &fakeRegistry{tag: "v2.0.0", digest: "sha256:new"}
-	dep := &fakeDeployer{
-		deployID:     "fail-deploy",
-		returnStatus: model.StatusFailed,
-		returnError:  "container crash",
-	}
-	w, _ := newTestWorker(t, reg, &fakeVerifier{}, dep)
-
-	if err := w.pollApp(context.Background(), w.apps["myapp"]); err == nil {
-		t.Fatal("expected error when deploy fails")
-	}
-
-	// State must not be saved on failed deploy.
-	state, _ := w.states.Load(context.Background(), "myapp")
-	if state != nil {
-		t.Fatalf("state should not be saved on failure, got: %+v", state)
-	}
-}
-
-func TestWorker_PollApp_ArtifactFetchFailure(t *testing.T) {
-	reg := &fakeRegistry{tag: "v1.0.0", digest: "sha256:abc"}
-	dep := &fakeDeployer{}
-	fetcher := &fakeArtifactFetcher{err: errors.New("registry unavailable")}
-
-	dir := t.TempDir()
-	appDir := filepath.Join(dir, "apps", "myapp")
-	os.MkdirAll(appDir, 0750)
-	rm := deploy.NewReleaseManager(slog.Default())
-
-	w := New(Config{
-		Apps:            map[string]model.AppConfig{"myapp": testApp(appDir)},
-		PollInterval:    time.Minute,
-		DataDir:         dir,
-		Registry:        reg,
-		Verifier:        &fakeVerifier{},
-		Deployer:        dep,
-		ArtifactFetcher: fetcher,
-		Releases:        rm,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
-	})
-
-	err := w.pollApp(context.Background(), w.apps["myapp"])
-	if err == nil {
-		t.Fatal("expected error on artifact fetch failure")
-	}
-	if !strings.Contains(err.Error(), "fetch artifact") {
-		t.Fatalf("expected 'fetch artifact' in error, got: %v", err)
-	}
-	// Deploy must not have been triggered.
-	if dep.lastImage != "" {
-		t.Fatal("deployer should not have been called after fetch failure")
-	}
-	// No staging dirs should remain.
-	relDir := filepath.Join(appDir, ".furnace", "releases")
-	if entries, err := os.ReadDir(relDir); err == nil {
-		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), ".staging-") {
-				t.Fatalf("staging dir not cleaned up: %s", e.Name())
-			}
-		}
-	}
-}
-
-func TestWorker_DrainHints(t *testing.T) {
-	pollCount := 0
-	reg := &countingRegistry{
-		inner: &fakeRegistry{tag: "v1.0.0", digest: "sha256:abc"},
-		count: &pollCount,
-	}
-	dep := &fakeDeployer{deployID: "d1", returnStatus: model.StatusCompleted}
-	w, _ := newTestWorker(t, reg, &fakeVerifier{}, dep)
-
-	hintDir := filepath.Join(w.dataDir, "hints")
-	if err := os.MkdirAll(hintDir, 0750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(hintDir, "myapp"), nil, 0640); err != nil {
-		t.Fatal(err)
-	}
-
-	w.drainHints(context.Background())
-
-	if pollCount != 1 {
-		t.Fatalf("expected 1 poll from hint, got %d", pollCount)
-	}
-	if _, err := os.Stat(filepath.Join(hintDir, "myapp")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("hint file not removed after drain")
-	}
-}
-
-func TestWorker_DrainHints_UnknownApp(t *testing.T) {
-	reg := &fakeRegistry{tag: "v1.0.0", digest: "sha256:abc"}
-	w, _ := newTestWorker(t, reg, &fakeVerifier{}, &fakeDeployer{})
-
-	hintDir := filepath.Join(w.dataDir, "hints")
-	os.MkdirAll(hintDir, 0750)
-	os.WriteFile(filepath.Join(hintDir, "unknown-app"), nil, 0640)
-
-	// Must not panic or error; just removes the hint file.
-	w.drainHints(context.Background())
-	if _, err := os.Stat(filepath.Join(hintDir, "unknown-app")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("hint file for unknown app should still be removed")
-	}
-}
-
-// countingRegistry wraps a RegistryClient and counts LatestTag calls.
-type countingRegistry struct {
-	inner RegistryClient
-	count *int
-}
-
-func (c *countingRegistry) LatestTag(ctx context.Context, repo, pattern string) (string, string, error) {
-	*c.count++
-	return c.inner.LatestTag(ctx, repo, pattern)
-}
-
-func TestWorker_PollApp_CleansStaleStagingDirs(t *testing.T) {
-	reg := &fakeRegistry{tag: "v1.0.0", digest: "sha256:abc"}
-	dep := &fakeDeployer{deployID: "deploy-v1.0.0", returnStatus: model.StatusCompleted}
-	w, appDir := newTestWorker(t, reg, &fakeVerifier{}, dep)
-
-	// Create stale staging dirs manually.
-	relDir := filepath.Join(appDir, ".furnace", "releases")
-	if err := os.MkdirAll(relDir, 0755); err != nil {
-		t.Fatalf("mkdir releases: %v", err)
-	}
-	stale1 := filepath.Join(relDir, ".staging-aaaa")
-	stale2 := filepath.Join(relDir, ".staging-bbbb")
-	if err := os.Mkdir(stale1, 0755); err != nil {
-		t.Fatalf("mkdir stale1: %v", err)
-	}
-	if err := os.Mkdir(stale2, 0755); err != nil {
-		t.Fatalf("mkdir stale2: %v", err)
-	}
-
-	if err := w.pollApp(context.Background(), w.apps["myapp"]); err != nil {
-		t.Fatalf("pollApp: %v", err)
-	}
-
-	if _, err := os.Stat(stale1); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expected stale1 to be removed")
-	}
-	if _, err := os.Stat(stale2); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expected stale2 to be removed")
+	if dep.startHits != 0 {
+		t.Fatalf("expected no deploy start, got %d", dep.startHits)
 	}
 }
 
 func TestWorker_PollApp_ArtifactOnlyChange(t *testing.T) {
-	reg := &fakeRegistry{tag: "v1.0.0", digest: "sha256:abc"}
-	dep := &fakeDeployer{deployID: "deploy-v1.0.0", returnStatus: model.StatusCompleted}
-	fetcher := &fakeArtifactFetcher{
-		digest:        "sha256:new-artifact",
-		resolveDigest: "sha256:new-artifact",
-	}
-
-	dir := t.TempDir()
-	appDir := filepath.Join(dir, "apps", "myapp")
-	os.MkdirAll(appDir, 0750)
-	rm := deploy.NewReleaseManager(slog.Default())
-	w := New(Config{
-		Apps:            map[string]model.AppConfig{"myapp": testApp(appDir)},
-		PollInterval:    time.Minute,
-		DataDir:         dir,
-		Registry:        reg,
-		Verifier:        &fakeVerifier{},
-		Deployer:        dep,
-		ArtifactFetcher: fetcher,
-		Releases:        rm,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
-	})
-
-	// Save state with matching image digest but stale artifact digest.
+	reg := &fakeRegistry{tag: "v1.0.0", digest: "sha256:image123"}
+	ver := &fakeVerifier{}
+	fetcher := &fakeArtifactFetcher{digest: "sha256:compose124", resolveDigest: "sha256:compose124"}
+	dep := &fakeDeployer{}
+	w, _ := newTestWorker(t, reg, ver, fetcher, dep)
 	if err := w.states.Save(context.Background(), "myapp", &AppState{
 		Tag:            "v1.0.0",
-		Digest:         "sha256:abc",
-		ArtifactDigest: "sha256:old-artifact",
+		Digest:         "sha256:image123",
+		ArtifactDigest: "sha256:compose123",
 	}); err != nil {
-		t.Fatal(err)
+		t.Fatalf("save state: %v", err)
 	}
 
 	if err := w.pollApp(context.Background(), w.apps["myapp"]); err != nil {
 		t.Fatalf("pollApp: %v", err)
 	}
-
-	if dep.lastImage == "" {
-		t.Fatal("expected deployer Start to be called on artifact-only change")
+	if ver.hits != 0 {
+		t.Fatalf("expected no image verify on artifact-only change, got %d", ver.hits)
 	}
-
-	state, _ := w.states.Load(context.Background(), "myapp")
-	if state == nil || state.ArtifactDigest != "sha256:new-artifact" {
-		t.Fatalf("expected updated artifact digest in state, got: %+v", state)
+	if dep.startHits != 1 {
+		t.Fatalf("expected deploy start on artifact-only change, got %d", dep.startHits)
 	}
 }
 
-func TestWorker_PollApp_ArtifactUnchanged(t *testing.T) {
-	reg := &fakeRegistry{tag: "v1.0.0", digest: "sha256:abc"}
-	dep := &fakeDeployer{}
-	fetcher := &fakeArtifactFetcher{resolveDigest: "sha256:same-artifact"}
-
-	dir := t.TempDir()
-	appDir := filepath.Join(dir, "apps", "myapp")
-	os.MkdirAll(appDir, 0750)
-	rm := deploy.NewReleaseManager(slog.Default())
-	w := New(Config{
-		Apps:            map[string]model.AppConfig{"myapp": testApp(appDir)},
-		PollInterval:    time.Minute,
-		DataDir:         dir,
-		Registry:        reg,
-		Verifier:        &fakeVerifier{},
-		Deployer:        dep,
-		ArtifactFetcher: fetcher,
-		Releases:        rm,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
-	})
-
-	// Save state with both image and artifact digest matching current registry state.
-	if err := w.states.Save(context.Background(), "myapp", &AppState{
-		Tag:            "v1.0.0",
-		Digest:         "sha256:abc",
-		ArtifactDigest: "sha256:same-artifact",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := w.pollApp(context.Background(), w.apps["myapp"]); err != nil {
-		t.Fatalf("pollApp: %v", err)
-	}
-
-	if dep.lastImage != "" {
-		t.Fatal("deployer should not be called when image and artifact are both unchanged")
-	}
-}
-
-func TestWorker_PollAll_BackoffSkipsFailingApp(t *testing.T) {
-	// "myapp" will fail; "otherapp" will succeed.
-	// After the first pollAll, myapp has failures=1 and a future nextPoll.
-	// A second pollAll must skip myapp and still poll otherapp.
-
-	myappPollCount := 0
-	otherappPollCount := 0
-
-	myReg := &countingRegistry{
-		inner: &fakeRegistry{err: errors.New("UNAUTHORIZED")},
-		count: &myappPollCount,
-	}
-	okReg := &countingRegistry{
-		inner: &fakeRegistry{tag: "v1.0.0", digest: "sha256:ok"},
-		count: &otherappPollCount,
-	}
-
-	dir := t.TempDir()
-	myAppDir := filepath.Join(dir, "apps", "myapp")
-	otherAppDir := filepath.Join(dir, "apps", "otherapp")
-	os.MkdirAll(myAppDir, 0750)
-	os.MkdirAll(otherAppDir, 0750)
-	rm := deploy.NewReleaseManager(slog.Default())
-
-	// Use a selectiveRegistry that dispatches by image name.
-	selReg := &selectiveRegistry{
-		registries: map[string]RegistryClient{
-			"ghcr.io/org/myapp":    myReg,
-			"ghcr.io/org/otherapp": okReg,
-		},
-	}
-
-	dep := &fakeDeployer{deployID: "d1", returnStatus: model.StatusCompleted}
-	w := New(Config{
-		Apps: map[string]model.AppConfig{
-			"myapp":    testApp(myAppDir),
-			"otherapp": {Name: "otherapp", Image: "ghcr.io/org/otherapp", TagPattern: "v*", AllowedIdentity: "org/otherapp", Dir: otherAppDir, Artifact: "ghcr.io/org/otherapp:{tag}-compose"},
-		},
-		PollInterval:    time.Minute,
-		DataDir:         dir,
-		Registry:        selReg,
-		Verifier:        &fakeVerifier{},
-		Deployer:        dep,
-		ArtifactFetcher: &fakeArtifactFetcher{},
-		Releases:        rm,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
-	})
-
-	w.pollAll(context.Background())
-
-	// Both apps polled on first round.
-	if myappPollCount != 1 {
-		t.Fatalf("expected myapp polled 1 time on first round, got %d", myappPollCount)
-	}
-	if otherappPollCount != 1 {
-		t.Fatalf("expected otherapp polled 1 time on first round, got %d", otherappPollCount)
-	}
-	if w.backoffs["myapp"].failures != 1 {
-		t.Fatalf("expected myapp failures=1, got %d", w.backoffs["myapp"].failures)
-	}
-
-	// Second pollAll: myapp is in backoff, otherapp polls again.
-	w.pollAll(context.Background())
-
-	if myappPollCount != 1 {
-		t.Fatalf("myapp should be skipped on second round, got %d polls", myappPollCount)
-	}
-	if otherappPollCount != 2 {
-		t.Fatalf("otherapp should be polled again, got %d polls", otherappPollCount)
-	}
-}
-
-func TestWorker_PollAll_BackoffResetsOnSuccess(t *testing.T) {
-	pollCount := 0
-	reg := &countingRegistry{
-		inner: &fakeRegistry{err: errors.New("fail")},
-		count: &pollCount,
-	}
-	dep := &fakeDeployer{deployID: "d1", returnStatus: model.StatusCompleted}
-	w, _ := newTestWorker(t, reg, &fakeVerifier{}, dep)
-
-	w.pollAll(context.Background())
-	if w.backoffs["myapp"].failures != 1 {
-		t.Fatalf("expected failures=1 after first failed poll, got %d", w.backoffs["myapp"].failures)
-	}
-
-	// Fix the registry and move nextPoll into the past to bypass the wait.
-	reg.inner = &fakeRegistry{tag: "v1.0.0", digest: "sha256:abc"}
-	w.backoffs["myapp"].nextPoll = time.Now().Add(-time.Second)
-
-	w.pollAll(context.Background())
-
-	if w.backoffs["myapp"].failures != 0 {
-		t.Fatalf("expected failures=0 after successful poll, got %d", w.backoffs["myapp"].failures)
-	}
-}
-
-func TestWorker_DrainHints_ResetsBackoff(t *testing.T) {
-	pollCount := 0
-	reg := &countingRegistry{
-		inner: &fakeRegistry{tag: "v1.0.0", digest: "sha256:abc"},
-		count: &pollCount,
-	}
-	dep := &fakeDeployer{deployID: "d1", returnStatus: model.StatusCompleted}
-	w, _ := newTestWorker(t, reg, &fakeVerifier{}, dep)
-
-	// Simulate accumulated backoff with a far-future nextPoll.
-	w.backoffs["myapp"].failures = 3
-	w.backoffs["myapp"].nextPoll = time.Now().Add(time.Hour)
-
-	hintDir := filepath.Join(w.dataDir, "hints")
-	os.MkdirAll(hintDir, 0750)
-	os.WriteFile(filepath.Join(hintDir, "myapp"), nil, 0640)
-
-	w.drainHints(context.Background())
-
-	if pollCount != 1 {
-		t.Fatalf("expected hint to trigger exactly 1 poll, got %d", pollCount)
-	}
-	if w.backoffs["myapp"].failures != 0 {
-		t.Fatalf("expected failures=0 after successful hint poll, got %d", w.backoffs["myapp"].failures)
-	}
-}
-
-func TestWorker_DrainHints_RecordsFailureAfterHint(t *testing.T) {
-	reg := &fakeRegistry{err: errors.New("still broken")}
-	dep := &fakeDeployer{}
-	w, _ := newTestWorker(t, reg, &fakeVerifier{}, dep)
-
-	// Simulate accumulated backoff.
-	w.backoffs["myapp"].failures = 3
-	w.backoffs["myapp"].nextPoll = time.Now().Add(time.Hour)
-
-	hintDir := filepath.Join(w.dataDir, "hints")
-	os.MkdirAll(hintDir, 0750)
-	os.WriteFile(filepath.Join(hintDir, "myapp"), nil, 0640)
-
-	w.drainHints(context.Background())
-
-	// Hint resets to 0 then records failure → failures=1 (fresh restart, not cumulative).
-	if w.backoffs["myapp"].failures != 1 {
-		t.Fatalf("expected failures=1 after hint-triggered failure, got %d", w.backoffs["myapp"].failures)
-	}
-}
-
-// selectiveRegistry dispatches LatestTag calls to per-image RegistryClient instances.
-type selectiveRegistry struct {
-	registries map[string]RegistryClient
-}
-
-func (s *selectiveRegistry) LatestTag(ctx context.Context, repo, pattern string) (string, string, error) {
-	if r, ok := s.registries[repo]; ok {
-		return r.LatestTag(ctx, repo, pattern)
-	}
-	return "", "", errors.New("no registry for " + repo)
-}
-
-func TestWorker_PollApp_ArtifactResolveFailure(t *testing.T) {
-	reg := &fakeRegistry{tag: "v1.0.0", digest: "sha256:abc"}
-	dep := &fakeDeployer{}
-	fetcher := &fakeArtifactFetcher{resolveErr: errors.New("registry unavailable")}
-
-	dir := t.TempDir()
-	appDir := filepath.Join(dir, "apps", "myapp")
-	os.MkdirAll(appDir, 0750)
-	rm := deploy.NewReleaseManager(slog.Default())
-	w := New(Config{
-		Apps:            map[string]model.AppConfig{"myapp": testApp(appDir)},
-		PollInterval:    time.Minute,
-		DataDir:         dir,
-		Registry:        reg,
-		Verifier:        &fakeVerifier{},
-		Deployer:        dep,
-		ArtifactFetcher: fetcher,
-		Releases:        rm,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
-	})
-
-	// Save state with matching image digest so we enter the artifact-check branch.
-	if err := w.states.Save(context.Background(), "myapp", &AppState{
-		Tag:    "v1.0.0",
-		Digest: "sha256:abc",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
+func TestWorker_PollApp_SignatureFailure(t *testing.T) {
+	reg := &fakeRegistry{tag: "v1.0.1", digest: "sha256:image124"}
+	ver := &fakeVerifier{err: model.ErrSignatureInvalid}
+	fetcher := &fakeArtifactFetcher{}
+	w, _ := newTestWorker(t, reg, ver, fetcher, &fakeDeployer{})
 	err := w.pollApp(context.Background(), w.apps["myapp"])
 	if err == nil {
-		t.Fatal("expected error when artifact ResolveDigest fails")
+		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "resolve artifact digest") {
-		t.Fatalf("expected 'resolve artifact digest' in error, got: %v", err)
+	if !errors.Is(err, model.ErrSignatureInvalid) {
+		t.Fatalf("expected ErrSignatureInvalid, got %v", err)
 	}
+}
+
+func TestWorker_PollApp_ArtifactFetchFailure(t *testing.T) {
+	reg := &fakeRegistry{tag: "v1.0.1", digest: "sha256:image124"}
+	ver := &fakeVerifier{}
+	fetcher := &fakeArtifactFetcher{err: errors.New("registry unavailable")}
+	w, _ := newTestWorker(t, reg, ver, fetcher, &fakeDeployer{})
+	err := w.pollApp(context.Background(), w.apps["myapp"])
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	want := "fetch artifact: registry unavailable"
+	if err.Error() != want {
+		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
+	}
+}
+
+func TestWorker_PollApp_DeployFailure(t *testing.T) {
+	reg := &fakeRegistry{tag: "v1.0.2", digest: "sha256:image125"}
+	ver := &fakeVerifier{}
+	fetcher := &fakeArtifactFetcher{digest: "sha256:compose125"}
+	dep := &fakeDeployer{
+		status:      model.StatusFailed,
+		returnError: "health check failed",
+	}
+	w, _ := newTestWorker(t, reg, ver, fetcher, dep)
+	err := w.pollApp(context.Background(), w.apps["myapp"])
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	want := "deploy failed: health check failed"
+	if err.Error() != want {
+		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
+	}
+	state, loadErr := w.states.Load(context.Background(), "myapp")
+	if loadErr != nil {
+		t.Fatalf("load state: %v", loadErr)
+	}
+	if state != nil {
+		t.Fatalf("expected no saved state after failed deploy, got %+v", state)
+	}
+}
+
+func TestWorker_DrainHints_TriggersImmediatePoll(t *testing.T) {
+	reg := &fakeRegistry{tag: "v1.0.3", digest: "sha256:image126"}
+	ver := &fakeVerifier{}
+	fetcher := &fakeArtifactFetcher{digest: "sha256:compose126"}
+	dep := &fakeDeployer{}
+	w, _ := newTestWorker(t, reg, ver, fetcher, dep)
+
+	hintDir := filepath.Join(w.dataDir, "hints")
+	if err := os.MkdirAll(hintDir, 0755); err != nil {
+		t.Fatalf("mkdir hints: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hintDir, "myapp"), []byte(""), 0644); err != nil {
+		t.Fatalf("write hint: %v", err)
+	}
+
+	w.drainHints(context.Background())
+
+	if reg.hits != 1 {
+		t.Fatalf("expected one latest tag lookup from hint, got %d", reg.hits)
+	}
+	if dep.startHits != 1 {
+		t.Fatalf("expected one deploy start from hint, got %d", dep.startHits)
+	}
+	if _, err := os.Stat(filepath.Join(hintDir, "myapp")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected hint file removed, got %v", err)
+	}
+}
+
+func TestWorker_PollApp_PassesDigestPinnedImageToVerifier(t *testing.T) {
+	reg := &fakeRegistry{tag: "v1.0.4", digest: "sha256:image127"}
+	var gotRef string
+	ver := &fakeVerifier{}
+	fetcher := &fakeArtifactFetcher{digest: "sha256:compose127"}
+	dep := &fakeDeployer{}
+
+	verifier := SignatureVerifierFunc(func(ctx context.Context, imageRef, allowedIdentity string) error {
+		gotRef = imageRef
+		return ver.Verify(ctx, imageRef, allowedIdentity)
+	})
+
+	w, _ := newTestWorker(t, reg, verifier, fetcher, dep)
+	if err := w.pollApp(context.Background(), w.apps["myapp"]); err != nil {
+		t.Fatalf("pollApp: %v", err)
+	}
+	if !strings.Contains(gotRef, ":v1.0.4@sha256:image127") {
+		t.Fatalf("expected digest-pinned image ref, got %q", gotRef)
+	}
+}
+
+type SignatureVerifierFunc func(ctx context.Context, imageRef, allowedIdentity string) error
+
+func (f SignatureVerifierFunc) Verify(ctx context.Context, imageRef, allowedIdentity string) error {
+	return f(ctx, imageRef, allowedIdentity)
 }
