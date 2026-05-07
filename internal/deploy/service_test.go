@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -51,7 +52,13 @@ func newTestService(t *testing.T, executor CommandExecutor, health HealthChecker
 	appDir := filepath.Join(dir, "apps", "testapp")
 	os.MkdirAll(appDir, 0750)
 
-	store := storage.NewFileDeploymentStore(filepath.Join(dir, "deployments"), slog.Default())
+	dbPath := fmt.Sprintf("%s/furnace.db", dir)
+	db, err := storage.OpenDB(dbPath, false, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	store := storage.NewSQLiteDeploymentStore(db, slog.Default())
 	auditLogger, _ := audit.NewFileLogger(filepath.Join(dir, "audit"))
 	lock := NewFileLock(filepath.Join(dir, "locks"))
 	rm := NewReleaseManager(slog.Default())

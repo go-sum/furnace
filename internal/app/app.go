@@ -1,9 +1,9 @@
 package app
 
 import (
+	"database/sql"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"time"
 
 	"github.com/go-sum/foundry/pkg/web"
@@ -23,8 +23,8 @@ type App struct {
 	Logger  *slog.Logger
 }
 
-func New(cfg *Config, logger *slog.Logger) (*App, error) {
-	store := storage.NewFileDeploymentStore(filepath.Join(cfg.DataDir, "deployments"), logger)
+func New(cfg *Config, db *sql.DB, logger *slog.Logger) (*App, error) {
+	store := storage.NewSQLiteDeploymentStore(db, logger)
 
 	apps := make(map[string]model.AppConfig, len(cfg.Apps))
 	for name := range cfg.Apps {

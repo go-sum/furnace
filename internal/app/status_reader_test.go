@@ -3,16 +3,28 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
-	"path/filepath"
+	"os"
 	"testing"
 
 	"github.com/go-sum/furnace/internal/model"
 	"github.com/go-sum/furnace/internal/storage"
 )
 
+func testStore(t *testing.T) *storage.SQLiteDeploymentStore {
+	t.Helper()
+	path := fmt.Sprintf("%s/furnace.db", t.TempDir())
+	db, err := storage.OpenDB(path, false, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return storage.NewSQLiteDeploymentStore(db, slog.Default())
+}
+
 func TestStatusReader_Status(t *testing.T) {
-	store := storage.NewFileDeploymentStore(filepath.Join(t.TempDir(), "deployments"), slog.Default())
+	store := testStore(t)
 	reader := newStatusReader(map[string]struct{}{"myapp": {}}, store)
 
 	deployment := &model.Deployment{
@@ -34,7 +46,7 @@ func TestStatusReader_Status(t *testing.T) {
 }
 
 func TestStatusReader_UnknownApp(t *testing.T) {
-	store := storage.NewFileDeploymentStore(filepath.Join(t.TempDir(), "deployments"), slog.Default())
+	store := testStore(t)
 	reader := newStatusReader(map[string]struct{}{"myapp": {}}, store)
 
 	_, err := reader.Status(context.Background(), "other")

@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 
 	"github.com/go-sum/foundry/pkg/web/serve"
+
+	"github.com/go-sum/furnace/internal/storage"
 )
 
 // Run loads configPath, constructs the furnace-web app, and serves it until ctx
@@ -16,7 +19,13 @@ func Run(ctx context.Context, configPath, listenAddr string, logger *slog.Logger
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	a, err := New(cfg, logger)
+	db, err := storage.OpenDB(filepath.Join(cfg.DataDir, "furnace.db"), true, logger)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer db.Close()
+
+	a, err := New(cfg, db, logger)
 	if err != nil {
 		return fmt.Errorf("create app: %w", err)
 	}

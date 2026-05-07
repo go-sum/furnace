@@ -92,9 +92,15 @@ func newWorkerRunCmd(configPath *string) *cobra.Command {
 			}
 			defer dockerClient.Close()
 
+			db, err := storage.OpenDB(filepath.Join(cfg.DataDir, "furnace.db"), false, logger)
+			if err != nil {
+				return fmt.Errorf("open db: %w", err)
+			}
+			defer db.Close()
+
 			lock := deploy.NewFileLock(filepath.Join(cfg.DataDir, "locks"))
 			health := deploy.NewDockerHealthChecker(dockerClient)
-			store := storage.NewFileDeploymentStore(filepath.Join(cfg.DataDir, "deployments"), logger)
+			store := storage.NewSQLiteDeploymentStore(db, logger)
 
 			auditLogger, err := audit.NewFileLogger(filepath.Join(cfg.DataDir, "audit"))
 			if err != nil {
