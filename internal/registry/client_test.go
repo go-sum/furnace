@@ -1,7 +1,11 @@
 package registry
 
 import (
+	"errors"
 	"testing"
+
+	gcr "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 )
 
 func TestSortTagsDesc_Semver(t *testing.T) {
@@ -99,4 +103,123 @@ func TestCompareSemver(t *testing.T) {
 			t.Fatalf("compareSemver(%+v, %+v): got %d, want %d", tc.a, tc.b, got, tc.want)
 		}
 	}
+}
+
+func TestIsDeployableImageDescriptor(t *testing.T) {
+	cases := []struct {
+		name string
+		desc gcr.Descriptor
+		want bool
+	}{
+		{
+			name: "oci image index",
+			desc: gcr.Descriptor{MediaType: types.OCIImageIndex},
+			want: true,
+		},
+		{
+			name: "docker manifest list",
+			desc: gcr.Descriptor{MediaType: types.DockerManifestList},
+			want: true,
+		},
+		{
+			name: "oci image manifest",
+			desc: gcr.Descriptor{MediaType: types.OCIManifestSchema1},
+			want: true,
+		},
+		{
+			name: "artifact manifest rejected",
+			desc: gcr.Descriptor{
+				MediaType:    types.OCIManifestSchema1,
+				ArtifactType: "application/vnd.furnace.compose",
+			},
+			want: false,
+		},
+		{
+			name: "unknown media type rejected",
+			desc: gcr.Descriptor{MediaType: "application/octet-stream"},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isDeployableImageDescriptor(tc.desc); got != tc.want {
+				t.Fatalf("isDeployableImageDescriptor(%+v) = %v, want %v", tc.desc, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSelectLatestDeployableTag(t *testing.T) {
+	tags := []string{"v0.1.99-test1-compose", "v0.1.99-test1", "v0.1.98"}
+	descByTag := map[string]gcr.Descriptor{
+		"v0.1.99-test1-compose": {
+			MediaType:    types.OCIManifestSchema1,
+			ArtifactType: "application/vnd.furnace.compose",
+			Digest:       mustDigestHash(t, "sha256:fb58c2f5ef713189b089cd0a4b8cc77130006f99da6eaac6f393dec7c4c3b11c"),
+		},
+		"v0.1.99-test1": {
+			MediaType: types.OCIImageIndex,
+			Digest:    mustDigestHash(t, "sha256:bd2437990a7019548c0908d81b7a34a605836a788bbb72040b0bd4c45c067137"),
+		},
+	}
+
+	tag, digest, err := selectLatestDeployableTag(tags, func(tag string) (gcr.Descriptor, error) {
+		desc, ok := descByTag[tag]
+		if !ok {
+			return gcr.Descriptor{}, errors.New("unexpected tag lookup")
+		}
+		return desc, nil
+	})
+	if err != nil {
+		t.Fatalf("selectLatestDeployableTag: %v", err)
+	}
+	if tag != "v0.1.99-test1" {
+		t.Fatalf("tag = %q, want %q", tag, "v0.1.99-test1")
+	}
+	wantDigest := "sha256:bd2437990a7019548c0908d81b7a34a605836a788bbb72040b0bd4c45c067137"
+	if digest != wantDigest {
+		t.Fatalf("digest = %q, want %q", digest, wantDigest)
+	}
+}
+
+func TestSelectLatestDeployableTag_NoDeployableTags(t *testing.T) {
+	tags := []string{"v0.1.99-test1-compose"}
+	_, _, err := selectLatestDeployableTag(tags, func(tag string) (gcr.Descriptor, error) {
+		return gcr.Descriptor{
+			MediaType:    types.OCIManifestSchema1,
+			ArtifactType: "application/vnd.furnace.compose",
+			Digest:       mustDigestHash(t, "sha256:fb58c2f5ef713189b089cd0a4b8cc77130006f99da6eaac6f393dec7c4c3b11c"),
+		}, nil
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	want := `no deployable image tags found`
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+func selectLatestDeployableTag(tags []string, resolve func(tag string) (gcr.Descriptor, error)) (string, string, error) {
+	for _, candidate := range tags {
+		desc, err := resolve(candidate)
+		if err != nil {
+			return "", "", err
+		}
+		if !isDeployableImageDescriptor(desc) {
+			continue
+		}
+		return candidate, desc.Digest.String(), nil
+	}
+	return "", "", errors.New("no deployable image tags found")
+}
+
+func mustDigestHash(t *testing.T, value string) gcr.Hash {
+	t.Helper()
+	h, err := gcr.NewHash(value)
+	if err != nil {
+		t.Fatalf("NewHash(%q): %v", value, err)
+	}
+	return h
 }
