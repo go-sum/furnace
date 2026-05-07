@@ -14,7 +14,7 @@ type AppConfig struct {
 	TLS             bool
 	EnvFile         string
 	ImageVar        string
-	HealthURL       string
+	Container       string
 	HealthTimeout   time.Duration
 	Artifact        string
 	KeepReleases    int

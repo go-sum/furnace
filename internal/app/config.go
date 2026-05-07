@@ -5,7 +5,6 @@ import (
 	"cmp"
 	"fmt"
 	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +17,7 @@ import (
 
 var validAppName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 var validDomain = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$`)
+var validContainerName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
 type Config struct {
 	DataDir        string            `yaml:"data_dir"`
@@ -36,7 +36,7 @@ type AppRaw struct {
 	TLS             bool          `yaml:"tls"`
 	EnvFile         string        `yaml:"env_file"`
 	ImageVar        string        `yaml:"image_var"`
-	HealthURL       string        `yaml:"health_url"`
+	Container       string        `yaml:"container"`
 	HealthTimeout   time.Duration `yaml:"health_timeout"`
 	Artifact        string        `yaml:"artifact"`
 	KeepReleases    int           `yaml:"keep_releases"`
@@ -95,7 +95,7 @@ func (c *Config) AppConfig(name string) (model.AppConfig, bool) {
 		TLS:             raw.TLS,
 		EnvFile:         raw.EnvFile,
 		ImageVar:        raw.ImageVar,
-		HealthURL:       raw.HealthURL,
+		Container:       raw.Container,
 		HealthTimeout:   cmp.Or(raw.HealthTimeout, 30*time.Second),
 		Artifact:        raw.Artifact,
 		KeepReleases:    raw.KeepReleases,
@@ -142,18 +142,11 @@ func (c *Config) validateApp(name string) (AppRaw, error) {
 		return AppRaw{}, fmt.Errorf("domain must be a valid lowercase hostname (e.g. app.example.com)")
 	}
 	raw.Port = cmp.Or(raw.Port, 8080)
-	if raw.HealthURL == "" {
-		return AppRaw{}, fmt.Errorf("health_url is required")
+	if raw.Container == "" {
+		return AppRaw{}, fmt.Errorf("container is required")
 	}
-	parsedURL, err := url.Parse(raw.HealthURL)
-	if err != nil {
-		return AppRaw{}, fmt.Errorf("health_url is invalid: %w", err)
-	}
-	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return AppRaw{}, fmt.Errorf("health_url must use http or https")
-	}
-	if parsedURL.Host == "" {
-		return AppRaw{}, fmt.Errorf("health_url must include a host")
+	if !validContainerName.MatchString(raw.Container) {
+		return AppRaw{}, fmt.Errorf("container must be a valid Docker container name")
 	}
 	if raw.Artifact == "" {
 		return AppRaw{}, fmt.Errorf("artifact is required")

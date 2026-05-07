@@ -36,10 +36,12 @@ func (f *fakeExecutor) Exec(_ context.Context, _ string, args []string) ([]byte,
 }
 
 type fakeHealthChecker struct {
-	err error
+	err              error
+	calledContainer  string
 }
 
-func (f *fakeHealthChecker) Check(_ context.Context, _ string, _ time.Duration) error {
+func (f *fakeHealthChecker) Check(_ context.Context, container string, _ time.Duration) error {
+	f.calledContainer = container
 	return f.err
 }
 
@@ -65,7 +67,7 @@ func newTestService(t *testing.T, executor CommandExecutor, health HealthChecker
 			Artifact:        "ghcr.io/org/myapp:{tag}-compose",
 			EnvFile:         ".deploy.env",
 			ImageVar:        "APP_IMAGE",
-			HealthURL:       "http://testapp-web-1:8080/healthz",
+			Container:       "testapp-web-1",
 			HealthTimeout:   5 * time.Second,
 			KeepReleases:    5,
 		},
@@ -552,6 +554,7 @@ func TestService_Start_RollbackComposeUpFailureRecordedInError(t *testing.T) {
 		t.Fatalf("error:\ngot  %q\nwant %q", d.Error, want)
 	}
 }
+
 
 type panicExecutor struct{}
 

@@ -18,7 +18,7 @@ apps:
     allowed_identity: "org/myapp"
     artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "myapp.example.com"
-    health_url: "http://` + name + `-web-1:8080/healthz"
+    container: "` + name + `-web-1"
 `
 }
 
@@ -65,7 +65,7 @@ apps:
     artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "myapp.example.com"
     env_file: "../escape.env"
-    health_url: "http://myapp-web-1:8080/healthz"
+    container: "myapp-web-1"
 `)
 	_, err := LoadConfig(path)
 	if err == nil {
@@ -78,7 +78,7 @@ apps:
 }
 
 
-func TestLoadConfig_RejectsInvalidHealthURLScheme(t *testing.T) {
+func TestLoadConfig_RejectsInvalidContainerName(t *testing.T) {
 	path := writeConfig(t, `
 data_dir: "/var/lib/furnace"
 apps:
@@ -88,13 +88,13 @@ apps:
     allowed_identity: "org/myapp"
     artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "myapp.example.com"
-    health_url: "ftp://myapp-web-1/healthz"
+    container: "-invalid"
 `)
 	_, err := LoadConfig(path)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	want := `app "myapp": health_url must use http or https`
+	want := `app "myapp": container must be a valid Docker container name`
 	if err.Error() != want {
 		t.Fatalf("error mismatch:\ngot  %q\nwant %q", err.Error(), want)
 	}
@@ -143,7 +143,7 @@ apps:
     allowed_identity: "notaslug"
     artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "myapp.example.com"
-    health_url: "http://myapp-web-1:8080/healthz"
+    container: "myapp-web-1"
 `)
 	_, err := LoadConfig(path)
 	if err == nil {
@@ -164,7 +164,7 @@ apps:
     tag_pattern: "v*"
     allowed_identity: "org/myapp"
     artifact: "ghcr.io/org/myapp:{tag}-compose"
-    health_url: "http://myapp-web-1:8080/healthz"
+    container: "myapp-web-1"
 `)
 	_, err := LoadConfig(path)
 	if err == nil {
@@ -202,7 +202,7 @@ apps:
     allowed_identity: "org/myapp"
     artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "`+domain+`"
-    health_url: "http://myapp-web-1:8080/healthz"
+    container: "myapp-web-1"
 `)
 			_, err := LoadConfig(path)
 			if err != nil {
@@ -233,7 +233,7 @@ apps:
     tag_pattern: "v*"
     allowed_identity: "org/myapp"
     domain: "`+tc.domain+`"
-    health_url: "http://myapp-web-1:8080/healthz"
+    container: "myapp-web-1"
 `)
 			_, err := LoadConfig(path)
 			if err == nil {
@@ -299,7 +299,7 @@ apps:
     allowed_identity: "org/myapp"
     artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "myapp.example.com"
-    health_url: "http://myapp-web-1:8080/healthz"
+    container: "myapp-web-1"
     tls: true
 `)
 	cfg, err := LoadConfig(path)
@@ -324,7 +324,7 @@ apps:
     tag_pattern: "v*"
     allowed_identity: "org/myapp"
     domain: "myapp.example.com"
-    health_url: "http://myapp-web-1:8080/healthz"
+    container: "myapp-web-1"
 `)
 	_, err := LoadConfig(path)
 	if err == nil {
@@ -362,7 +362,7 @@ apps:
     allowed_identity: "org/myapp"
     artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "myapp.example.com"
-    health_url: "http://myapp-web-1:8080/healthz"
+    container: "myapp-web-1"
     keep_releases: 10
 `)
 	cfg, err := LoadConfig(path)
@@ -388,7 +388,7 @@ apps:
     allowed_identity: "org/myapp"
     artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "myapp.example.com"
-    health_url: "http://myapp-web-1:8080/healthz"
+    container: "myapp-web-1"
     keep_releases: -1
 `)
 	_, err := LoadConfig(path)

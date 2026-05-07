@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/docker/docker/client"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/spf13/cobra"
 
@@ -85,8 +86,14 @@ func newWorkerRunCmd(configPath *string) *cobra.Command {
 			composeFetcher := deploy.NewArtifactFetcher(verifier, keychain)
 			releases := deploy.NewReleaseManager(logger)
 
+			dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+			if err != nil {
+				return fmt.Errorf("create docker client: %w", err)
+			}
+			defer dockerClient.Close()
+
 			lock := deploy.NewFileLock(filepath.Join(cfg.DataDir, "locks"))
-			health := deploy.NewHTTPHealthChecker()
+			health := deploy.NewDockerHealthChecker(dockerClient)
 			store := storage.NewFileDeploymentStore(filepath.Join(cfg.DataDir, "deployments"), logger)
 
 			auditLogger, err := audit.NewFileLogger(filepath.Join(cfg.DataDir, "audit"))

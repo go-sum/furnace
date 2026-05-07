@@ -32,7 +32,7 @@ apps:
     allowed_identity: "org/myapp"
     artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "myapp.example.com"
-    health_url: "http://myapp-web-1:8080/healthz"
+    container: "myapp-web-1"
 `
 
 func TestGenerateCaddyfile_TLSEnabled(t *testing.T) {
@@ -45,7 +45,7 @@ apps:
     allowed_identity: "org/myapp"
     artifact: "ghcr.io/org/myapp:{tag}-compose"
     domain: "myapp.example.com"
-    health_url: "http://myapp-web-1:8080/healthz"
+    container: "myapp-web-1"
     tls: true
 `)
 	out, err := generateCaddyfile(cfg)
@@ -78,7 +78,7 @@ apps:
     allowed_identity: "org/localapp"
     artifact: "ghcr.io/org/localapp:{tag}-compose"
     domain: "local.example.com"
-    health_url: "http://localapp-web-1:8080/healthz"
+    container: "localapp-web-1"
     tls: true
   cloudapp:
     image: "ghcr.io/org/cloudapp"
@@ -86,7 +86,7 @@ apps:
     allowed_identity: "org/cloudapp"
     artifact: "ghcr.io/org/cloudapp:{tag}-compose"
     domain: "cloud.example.com"
-    health_url: "http://cloudapp-web-1:8080/healthz"
+    container: "cloudapp-web-1"
 `)
 	out, err := generateCaddyfile(cfg)
 	if err != nil {

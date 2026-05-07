@@ -214,7 +214,7 @@ func (s *Service) execute(app model.AppConfig, deployment *model.Deployment, rel
 	deployment.Status = model.StatusHealthCheck
 	s.saveState(ctx, deployment)
 
-	if err := s.health.Check(ctx, app.HealthURL, app.HealthTimeout); err != nil {
+	if err := s.health.Check(ctx, app.Container, app.HealthTimeout); err != nil {
 		s.failDeployment(ctx, app, deployment, "health check", err, &envState, prevComposeFiles)
 		return
 	}
