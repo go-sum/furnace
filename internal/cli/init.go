@@ -28,11 +28,11 @@ type dirSpec struct {
 }
 
 var managedDirs = []dirSpec{
-	{"/etc/furnace",       ownerRootFurnace, 0750},
-	{"/var/lib/furnace",   ownerFurnace,     0755},
-	{"/srv/apps",          ownerFurnace,     0755},
-	{"/srv/furnace/proxy", ownerFurnace,     0755},
-	{"/srv/furnace/certs", ownerFurnace,     0755},
+	{"/etc/furnace", ownerRootFurnace, 0750},
+	{"/var/lib/furnace", ownerFurnace, 0755},
+	{"/srv/apps", ownerFurnace, 0755},
+	{"/srv/furnace/proxy", ownerFurnace, 0755},
+	{"/srv/furnace/certs", ownerFurnace, 0755},
 }
 
 func newInitCmd() *cobra.Command {
@@ -158,18 +158,21 @@ func ensureDir(path string, mode os.FileMode) (created bool, err error) {
 }
 
 func ensureConfigScaffold(gid int) error {
-	const configPath = "/etc/furnace/furnace.yaml"
-	if _, err := os.Stat(configPath); err == nil {
-		fmt.Printf("exists   %s (not overwritten)\n", configPath)
-		_ = os.Chown(configPath, 0, gid) // best-effort: file already exists; ownership adjustment is advisory
+	if _, err := os.Stat(furnaceConfigPath); err == nil {
+		fmt.Printf("exists   %s (not overwritten)\n", furnaceConfigPath)
+		_ = os.Chown(furnaceConfigPath, 0, gid) // best-effort: file already exists; ownership adjustment is advisory
+		_ = ensureWebReadableConfig(furnaceConfigPath)
 		return nil
 	}
-	if err := os.WriteFile(configPath, furnaceconfig.ExampleConfig, 0640); err != nil {
+	if err := os.WriteFile(furnaceConfigPath, furnaceconfig.ExampleConfig, 0644); err != nil {
 		return err
 	}
-	if err := os.Chown(configPath, 0, gid); err != nil {
+	if err := os.Chown(furnaceConfigPath, 0, gid); err != nil {
 		return fmt.Errorf("chown config: %w", err)
 	}
-	fmt.Printf("created  %s\n", configPath)
+	if err := ensureWebReadableConfig(furnaceConfigPath); err != nil {
+		return err
+	}
+	fmt.Printf("created  %s\n", furnaceConfigPath)
 	return nil
 }

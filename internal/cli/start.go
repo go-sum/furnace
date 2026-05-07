@@ -51,6 +51,11 @@ func runStart(configPath, credential string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	if configPath == furnaceConfigPath {
+		if err := ensureWebReadableConfig(configPath); err != nil {
+			return fmt.Errorf("ensure web-readable config: %w", err)
+		}
+	}
 
 	if err := writeProxyFiles(cfg); err != nil {
 		return fmt.Errorf("write proxy files: %w", err)
