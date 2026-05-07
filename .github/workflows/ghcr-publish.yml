@@ -104,7 +104,7 @@ jobs:
           if [[ "${{ inputs.push_latest }}" == "true" ]]; then
             args+=(--push-latest)
           fi
-          bin/ghcr-publish.sh "${args[@]}"
+          bash bin/ghcr-publish.sh "${args[@]}"
 
       - name: Upload publish manifest
         uses: actions/upload-artifact@v5
