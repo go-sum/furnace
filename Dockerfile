@@ -38,7 +38,7 @@ COPY --from=healthcheck_builder --chown=nonroot:nonroot /healthcheck            
 USER nonroot
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=6 \
     CMD ["/usr/local/bin/healthcheck"]
 
 ENTRYPOINT ["/usr/local/bin/furnace-web"]

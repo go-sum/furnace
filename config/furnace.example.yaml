@@ -15,6 +15,7 @@ apps:
     domain: "furnace.server"
     dir: "/srv/apps/furnace-web"
     container: "furnace-web-web-1"
+    health_timeout: "120s"
     tls: true
   # myapp:
   #   image: "ghcr.io/yourorg/myapp"
