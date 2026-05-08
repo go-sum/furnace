@@ -1,28 +1,22 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 
 	"github.com/spf13/cobra"
 
-	"github.com/go-sum/furnace/internal/app"
 	"github.com/go-sum/furnace/internal/certgen"
+	"github.com/go-sum/furnace/internal/model"
+	"github.com/go-sum/furnace/internal/storage"
 )
 
-const (
-	caCertPath     = "/var/lib/furnace/ca/ca.pem"
-	caKeyPath      = "/var/lib/furnace/ca/ca-key.pem"
-	serverCertPath = "/srv/furnace/certs/local.pem"
-	serverKeyPath  = "/srv/furnace/certs/local-key.pem"
-	systemCADest   = "/usr/local/share/ca-certificates/furnace-ca.crt"
-)
-
-func newMkcertCmd(configPath *string) *cobra.Command {
+func newMkcertCmd() *cobra.Command {
 	var install bool
 
 	cmd := &cobra.Command{
@@ -32,7 +26,7 @@ func newMkcertCmd(configPath *string) *cobra.Command {
 			if install {
 				return runMkcertInstall()
 			}
-			return runMkcertGenerate(*configPath, args)
+			return runMkcertGenerate(cmd.Context(), args)
 		},
 	}
 
@@ -45,8 +39,8 @@ func runMkcertInstall() error {
 		return fmt.Errorf("furnace mkcert --install requires root privileges (run with sudo)")
 	}
 
-	if _, err := os.Stat(caCertPath); err == nil {
-		fmt.Println("exists   CA at", caCertPath)
+	if _, err := os.Stat(CACertPath); err == nil {
+		fmt.Println("exists   CA at", CACertPath)
 		return nil
 	}
 
@@ -55,16 +49,16 @@ func runMkcertInstall() error {
 		return fmt.Errorf("generate CA: %w", err)
 	}
 
-	if err := certgen.WriteCA(ca, caCertPath, caKeyPath); err != nil {
+	if err := certgen.WriteCA(ca, CACertPath, CAKeyPath); err != nil {
 		return fmt.Errorf("write CA: %w", err)
 	}
-	fmt.Printf("wrote    %s\n", caCertPath)
-	fmt.Printf("wrote    %s\n", caKeyPath)
+	fmt.Printf("wrote    %s\n", CACertPath)
+	fmt.Printf("wrote    %s\n", CAKeyPath)
 
-	if err := copyFile(caCertPath, systemCADest, 0644); err != nil {
+	if err := copyFile(CACertPath, SystemCADest, 0644); err != nil {
 		return fmt.Errorf("install CA: %w", err)
 	}
-	fmt.Printf("installed %s\n", systemCADest)
+	fmt.Printf("installed %s\n", SystemCADest)
 
 	c := exec.Command("update-ca-certificates")
 	c.Stdout = os.Stdout
@@ -76,42 +70,50 @@ func runMkcertInstall() error {
 	return nil
 }
 
-func runMkcertGenerate(configPath string, args []string) error {
+func runMkcertGenerate(ctx context.Context, args []string) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("furnace mkcert requires root privileges (run with sudo)")
 	}
 
-	ca, err := certgen.LoadCA(caCertPath, caKeyPath)
+	ca, err := certgen.LoadCA(CACertPath, CAKeyPath)
 	if err != nil {
 		return fmt.Errorf("load CA: run 'furnace mkcert --install' first")
 	}
 
-	cfg, err := app.LoadConfig(configPath)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	db, err := storage.OpenDB(DBPath, true, logger)
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer db.Close()
+
+	appStore := storage.NewSQLiteAppStore(db, logger)
+	appList, err := appStore.ListApps(ctx)
+	if err != nil {
+		return fmt.Errorf("list apps: %w", err)
 	}
 
 	var domains []string
 	if len(args) == 0 {
-		names := make([]string, 0, len(cfg.Apps))
-		for name := range cfg.Apps {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			appCfg, _ := cfg.AppConfig(name)
-			if appCfg.TLS {
-				domains = append(domains, appCfg.Domain)
+		// appList is already sorted by name (ORDER BY name in ListApps)
+		for _, a := range appList {
+			if a.TLS {
+				domains = append(domains, a.Domain)
 			}
 		}
 	} else {
+		appMap := make(map[string]model.AppConfig, len(appList))
+		for _, a := range appList {
+			appMap[a.Name] = a
+		}
 		for _, name := range args {
-			appCfg, ok := cfg.AppConfig(name)
+			a, ok := appMap[name]
 			if !ok {
 				return fmt.Errorf("app %q not found in config", name)
 			}
-			if appCfg.TLS {
-				domains = append(domains, appCfg.Domain)
+			if a.TLS {
+				domains = append(domains, a.Domain)
 			}
 		}
 	}
@@ -126,18 +128,18 @@ func runMkcertGenerate(configPath string, args []string) error {
 		return fmt.Errorf("generate server cert: %w", err)
 	}
 
-	if err := os.MkdirAll("/srv/furnace/certs", 0755); err != nil {
+	if err := os.MkdirAll(CertsDir, 0755); err != nil {
 		return fmt.Errorf("create certs dir: %w", err)
 	}
-	if err := os.WriteFile(serverCertPath, certPEM, 0644); err != nil {
+	if err := os.WriteFile(ServerCertPath, certPEM, 0644); err != nil {
 		return fmt.Errorf("write cert: %w", err)
 	}
-	if err := os.WriteFile(serverKeyPath, keyPEM, 0600); err != nil {
+	if err := os.WriteFile(ServerKeyPath, keyPEM, 0600); err != nil {
 		return fmt.Errorf("write key: %w", err)
 	}
 
-	fmt.Printf("wrote    %s\n", serverCertPath)
-	fmt.Printf("wrote    %s\n", serverKeyPath)
+	fmt.Printf("wrote    %s\n", ServerCertPath)
+	fmt.Printf("wrote    %s\n", ServerKeyPath)
 	fmt.Println("domains covered:")
 	for _, d := range domains {
 		fmt.Printf("  %s\n", d)

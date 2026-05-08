@@ -11,7 +11,7 @@ import (
 	"github.com/go-sum/furnace/internal/app"
 )
 
-func newWebCmd(configPath *string) *cobra.Command {
+func newWebCmd() *cobra.Command {
 	var listenAddr string
 
 	cmd := &cobra.Command{
@@ -24,7 +24,7 @@ func newWebCmd(configPath *string) *cobra.Command {
 			defer stop()
 
 			logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-			return app.Run(ctx, *configPath, listenAddr, logger)
+			return app.Run(ctx, DBPath, listenAddr, logger)
 		},
 	}
 

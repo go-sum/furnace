@@ -12,6 +12,15 @@ import (
 	"github.com/go-sum/furnace/internal/storage"
 )
 
+type fakeAppChecker struct {
+	exists bool
+	err    error
+}
+
+func (f *fakeAppChecker) AppExists(_ context.Context, _ string) (bool, error) {
+	return f.exists, f.err
+}
+
 func testStore(t *testing.T) *storage.SQLiteDeploymentStore {
 	t.Helper()
 	path := fmt.Sprintf("%s/furnace.db", t.TempDir())
@@ -25,7 +34,7 @@ func testStore(t *testing.T) *storage.SQLiteDeploymentStore {
 
 func TestStatusReader_Status(t *testing.T) {
 	store := testStore(t)
-	reader := newStatusReader(map[string]struct{}{"myapp": {}}, store)
+	reader := newStatusReader(&fakeAppChecker{exists: true}, store)
 
 	deployment := &model.Deployment{
 		ID:      "01ABC",
@@ -47,10 +56,23 @@ func TestStatusReader_Status(t *testing.T) {
 
 func TestStatusReader_UnknownApp(t *testing.T) {
 	store := testStore(t)
-	reader := newStatusReader(map[string]struct{}{"myapp": {}}, store)
+	reader := newStatusReader(&fakeAppChecker{exists: false}, store)
 
 	_, err := reader.Status(context.Background(), "other")
 	if !errors.Is(err, model.ErrAppNotFound) {
 		t.Fatalf("expected ErrAppNotFound, got %v", err)
+	}
+}
+
+func TestStatusReader_AppCheckerError(t *testing.T) {
+	store := testStore(t)
+	reader := newStatusReader(&fakeAppChecker{err: errors.New("db error")}, store)
+
+	_, err := reader.Status(context.Background(), "myapp")
+	if err == nil {
+		t.Fatal("expected error from AppChecker failure")
+	}
+	if errors.Is(err, model.ErrAppNotFound) {
+		t.Fatal("expected non-ErrAppNotFound error from AppChecker failure")
 	}
 }

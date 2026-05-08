@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,13 +15,12 @@ import (
 
 func TestHintHandler_KnownApp(t *testing.T) {
 	dataDir := t.TempDir()
-	apps := map[string]struct{}{"myapp": {}}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/apps/myapp/deploy", nil)
 	c := serve.NewContext(req)
 	c.SetParam("app", "myapp")
 
-	h := NewHintHandler(dataDir, apps)
+	h := NewHintHandler(dataDir, &fakeAppChecker{exists: true})
 	resp, err := h.Hint(c)
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
@@ -51,12 +51,11 @@ func TestHintHandler_MkdirError(t *testing.T) {
 	f.Close()
 	t.Cleanup(func() { os.Remove(f.Name()) })
 
-	apps := map[string]struct{}{"myapp": {}}
 	req := httptest.NewRequest(http.MethodPost, "/v1/apps/myapp/deploy", nil)
 	c := serve.NewContext(req)
 	c.SetParam("app", "myapp")
 
-	h := NewHintHandler(f.Name(), apps)
+	h := NewHintHandler(f.Name(), &fakeAppChecker{exists: true})
 	_, handlerErr := h.Hint(c)
 	if handlerErr == nil {
 		t.Fatal("expected error when hint dir cannot be created")
@@ -68,18 +67,51 @@ func TestHintHandler_MkdirError(t *testing.T) {
 
 func TestHintHandler_UnknownApp(t *testing.T) {
 	dataDir := t.TempDir()
-	apps := map[string]struct{}{"myapp": {}}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/apps/other/deploy", nil)
 	c := serve.NewContext(req)
 	c.SetParam("app", "other")
 
-	h := NewHintHandler(dataDir, apps)
+	h := NewHintHandler(dataDir, &fakeAppChecker{exists: false})
 	resp, err := h.Hint(c)
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
 	if resp.Status != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", resp.Status)
+	}
+}
+
+func TestHintHandler_AppCheckerError(t *testing.T) {
+	dataDir := t.TempDir()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/apps/myapp/deploy", nil)
+	c := serve.NewContext(req)
+	c.SetParam("app", "myapp")
+
+	h := NewHintHandler(dataDir, &fakeAppChecker{err: errors.New("db error")})
+	_, handlerErr := h.Hint(c)
+	if handlerErr == nil {
+		t.Fatal("expected error from AppChecker failure")
+	}
+	if !strings.Contains(handlerErr.Error(), "check app") {
+		t.Fatalf("expected 'check app' in error, got: %v", handlerErr)
+	}
+}
+
+func TestHintHandler_InvalidAppName(t *testing.T) {
+	dataDir := t.TempDir()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/apps/../etc/passwd/deploy", nil)
+	c := serve.NewContext(req)
+	c.SetParam("app", "../etc/passwd")
+
+	h := NewHintHandler(dataDir, &fakeAppChecker{exists: true})
+	resp, err := h.Hint(c)
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.Status)
 	}
 }

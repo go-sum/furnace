@@ -75,26 +75,6 @@ LIMIT 1`, appName)
 	return d, nil
 }
 
-func (s *SQLiteDeploymentStore) GetPrevious(ctx context.Context, appName string) (*model.Deployment, error) {
-	row := s.db.QueryRowContext(ctx, `
-SELECT id, app_name, image, tag, digest, artifact_digest, prev_image, status, started_at, ended_at, error
-FROM deployments
-WHERE app_name = ?
-  AND status = 'completed'
-  AND id != (SELECT id FROM deployments WHERE app_name = ? ORDER BY started_at DESC LIMIT 1)
-ORDER BY started_at DESC
-LIMIT 1`, appName, appName)
-
-	d, err := scanDeployment(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return d, nil
-}
-
 func (s *SQLiteDeploymentStore) List(ctx context.Context, appName string, limit int) ([]model.Deployment, error) {
 	effectiveLimit := limit
 	if effectiveLimit <= 0 {
@@ -114,7 +94,7 @@ LIMIT ?`, appName, effectiveLimit)
 
 	var deployments []model.Deployment
 	for rows.Next() {
-		d, err := scanDeploymentRow(rows)
+		d, err := scanDeployment(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -179,8 +159,4 @@ func scanDeployment(s scanner) (*model.Deployment, error) {
 		}
 	}
 	return &d, nil
-}
-
-func scanDeploymentRow(rows *sql.Rows) (*model.Deployment, error) {
-	return scanDeployment(rows)
 }

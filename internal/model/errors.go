@@ -8,4 +8,5 @@ var (
 	ErrHealthCheckFailed    = errors.New("health check failed")
 	ErrImageInvalid         = errors.New("image ref contains invalid characters")
 	ErrSignatureInvalid     = errors.New("image signature verification failed")
+	ErrInvalidConfig        = errors.New("invalid config")
 )

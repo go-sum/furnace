@@ -15,10 +15,10 @@ import (
 var Version = "dev"
 
 func main() {
-	var configPath string
+	var dbPath string
 	var listenAddr string
 
-	flag.StringVar(&configPath, "config", "/etc/furnace/furnace.yaml", "path to configuration file")
+	flag.StringVar(&dbPath, "db", "/var/lib/furnace/furnace.db", "path to SQLite database")
 	flag.StringVar(&listenAddr, "listen", ":8080", "HTTP listen address")
 	flag.Parse()
 
@@ -27,7 +27,7 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	logger.Info("furnace-web starting", "version", Version)
-	if err := app.Run(ctx, configPath, listenAddr, logger); err != nil {
+	if err := app.Run(ctx, dbPath, listenAddr, logger); err != nil {
 		logger.Error("furnace-web exited", "error", err)
 		os.Exit(1)
 	}

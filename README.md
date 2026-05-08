@@ -51,7 +51,7 @@ A pull-based deployment agent for VPS servers. You SSH in once to bootstrap it, 
 ```
 worker
   │
-  ├─ for each app in furnace.yaml:
+  ├─ for each app in the database:
   │    1. List tags from GHCR matching tag_pattern
   │    2. Find the newest semver tag not yet deployed
   │    3. If image digest matches last deploy AND artifact digest matches → skip
@@ -60,7 +60,7 @@ worker
   │    6. Stage artifact files in a new .furnace/releases/.staging-* directory
   │    7. Commit staging → rename to digest-based release directory
   │    8. docker compose pull && docker compose up -d --remove-orphans (from staged release)
-  │    9. Poll health_url until 2xx or timeout
+  │    9. Poll container HEALTHCHECK via Docker API until healthy or timeout
   │   10. On success: flip current symlink to new release; prune old releases
   │   11. On failure: mark release .furnace-bad; current symlink unchanged (instant rollback)
   │
@@ -165,54 +165,23 @@ sudo furnace init
 This creates:
 ```bash
     user `furnace`  # added to the `docker` group
-    
-    /etc/furnace/furnace.yaml # config scaffold (only on first run)
-    /var/lib/furnace/ # deployment records, audit logs, locks
+
+    /var/lib/furnace/furnace.db      # SQLite database (seeded with defaults)
+    /var/lib/furnace/furnace.db-wal  # WAL journal
+    /var/lib/furnace/furnace.db-shm  # shared memory
     /srv/apps/ # app directories
     /srv/furnace/proxy/ # Caddy reverse proxy compose setup
     /srv/furnace/certs/ # TLS certificates
     caddy_net # Docker bridge network
 ```
 
-### 3. Edit the config
+`furnace init` seeds the database with default config values and a `furnace-web` app entry.
 
-```bash
-sudo nano /etc/furnace/furnace.yaml
-  or
-sudo vi /etc/furnace/furnace.yaml
-```
+### 3. Configure the apps
 
-Add each app you want to deploy, including `furnace-web` itself:
+App configuration is stored in the SQLite database at `/var/lib/furnace/furnace.db`. `furnace init` pre-seeds the database with a `furnace-web` app entry and default global config values — no manual config file editing is required for a standard setup.
 
-```yaml
-data_dir: "/var/lib/furnace"
-poll_interval: "60s"
-
-apps:
-  furnace-web:
-    image: "ghcr.io/go-sum/furnace-web"
-    tag_pattern: "v*"
-    allowed_identity: "go-sum/furnace"
-    artifact: "ghcr.io/go-sum/furnace-web:{tag}-compose"
-    domain: "furnace.example.com"
-    dir: "/srv/apps/furnace-web"
-    health_url: "http://furnace-web-web-1:8080/v1/health"
-
-  myapp:
-    image: "ghcr.io/yourorg/myapp"
-    tag_pattern: "v*"
-    allowed_identity: "yourorg/myapp"
-    artifact: "ghcr.io/yourorg/myapp:{tag}-compose"
-    domain: "myapp.example.com"
-    dir: "/srv/apps/myapp"
-    health_url: "http://myapp-web-1:8080/healthz"
-```
-
-Validate the config before starting:
-
-```bash
-sudo furnace validate
-```
+Additional apps are managed via the `furnace-web` web interface (once it is running) or by inserting rows directly into the `apps` table. See [Configuration Reference](#configuration-reference) for the full schema.
 
 ### 4. TLS certificates
 
@@ -285,25 +254,13 @@ All further updates happen automatically — the worker polls GHCR and deploys n
 
 To add a new app after initial setup:
 
-1. Add the app entry to `/etc/furnace/furnace.yaml` (set `tls: true` if the app needs a local cert)
+1. Add the app via `furnace-web` (set `tls: true` if the app needs a local cert)
 2. Run `sudo furnace proxy init` to regenerate the Caddyfile
 3. Run `sudo furnace proxy up` to reload Caddy with the new route
 4. If `tls: true`, run `sudo furnace mkcert` to regenerate the server cert with the new domain
 5. Run `sudo systemctl restart furnace-worker`
 
-The worker reads config once at startup. Adding or removing apps requires a restart. furnace-web redeploys automatically on the next poll cycle.
-
-Minimal app entry:
-
-```yaml
-  myapp:
-    image: "ghcr.io/yourorg/myapp"
-    tag_pattern: "v*"
-    allowed_identity: "yourorg/myapp"
-    artifact: "ghcr.io/yourorg/myapp:{tag}-compose"
-    domain: "myapp.example.com"
-    health_url: "http://myapp-web-1:8080/healthz"
-```
+The worker reads app configuration from the database at startup. Adding or removing apps requires a restart. furnace-web redeploys automatically on the next poll cycle.
 
 The `artifact` field is required — compose topology is always fetched from the OCI artifact and Sigstore-verified on every deploy. The artifact must be signed with the same `allowed_identity` as the app image. Use `{tag}` as a placeholder for the image tag being deployed.
 
@@ -391,111 +348,75 @@ What it removes:
 
 ## CLI Reference
 
-```
-furnace [--config <path>] <command>
-```
-
-Global flag: `--config` sets the config file path (default: `/etc/furnace/furnace.yaml`).
-
 | Command | Requires root | Description |
 |---------|--------------|-------------|
-| `furnace init` | yes | Create system user, directories, config scaffold, and `caddy_net` network. Idempotent. |
+| `furnace init` | yes | Create system user, directories, seed database, and `caddy_net` network. Idempotent. |
 | `furnace start [--credential-stdin]` | yes | Write systemd unit, start Caddy proxy, enable and start worker. Pass `--credential-stdin` to read a registry token from stdin. |
 | `furnace reset` | yes | Remove all furnace state — inverse of `init` + `start`. Prompts for confirmation. |
-| `furnace validate` | no | Parse and validate the config file; print app count. |
 | `furnace mkcert --install` | yes | Generate ECDSA P-256 CA, write to `/var/lib/furnace/ca/`, install to system trust store. Skips if CA already exists. |
-| `furnace mkcert [app...]` | yes | Generate server cert for all apps (or named apps) from config. Writes to `/srv/furnace/certs/local.pem` and `local-key.pem`. Requires CA from `--install`. |
-| `furnace proxy init` | yes | Regenerate Caddyfile and `compose.yml` from current config. |
-| `furnace proxy up` | yes | Start (or restart) the Caddy container (`docker compose up -d`). |
-| `furnace proxy down` | yes | Stop the Caddy container (`docker compose down`). |
-| `furnace proxy status` | yes | Show Caddy container status (`docker compose ps`). |
-| `furnace proxy logs [-f]` | yes | Show Caddy container logs. Pass `-f` to follow. |
+| `furnace mkcert [app...]` | yes | Generate server cert for all apps (or named apps) from the database. Writes to `/srv/furnace/certs/local.pem` and `local-key.pem`. Requires CA from `--install`. |
+| `furnace proxy init` | no | Regenerate Caddyfile and `compose.yml` from current app config. Requires Docker access. |
+| `furnace proxy up` | no | Start (or restart) the Caddy container (`docker compose up -d`). Requires Docker access. |
+| `furnace proxy down` | no | Stop the Caddy container (`docker compose down`). Requires Docker access. |
+| `furnace proxy status` | no | Show Caddy container status (`docker compose ps`). Requires Docker access. |
+| `furnace proxy logs [-f]` | no | Show Caddy container logs. Pass `-f` to follow. Requires Docker access. |
 | `furnace worker run` | no | Run the furnace-worker poll loop (used by systemd). Handles graceful shutdown on SIGINT/SIGTERM. |
 | `furnace worker stop` | yes | Stop the furnace-worker systemd unit. |
 | `furnace worker status` | no | Show furnace-worker systemd unit status. |
 | `furnace worker logs [-f]` | no | Show furnace-worker logs via journalctl. Pass `-f` to follow. |
 
+Proxy commands require Docker access (via `docker` group membership or root).
+
 `furnace worker run` is the subcommand used by the systemd unit. The containerized HTTP app is shipped separately as the `ghcr.io/go-sum/furnace-web` image and runs the `furnace-web` binary directly.
 
 ## Configuration Reference
 
-`/etc/furnace/furnace.yaml`:
+Configuration is stored in the SQLite database at `/var/lib/furnace/furnace.db`, seeded by `furnace init`.
 
-```yaml
-# Deployment records, audit logs, locks, env backups.
-data_dir: "/var/lib/furnace"
+### `config` table — global settings
 
-# How often to poll each app's registry. The /deploy hint can short-circuit to 1s.
-poll_interval: "60s"
+| Key | Default | Description |
+|-----|---------|-------------|
+| `data_dir` | `/var/lib/furnace` | Deployment records, audit logs, locks, env backups. |
+| `poll_interval` | `60s` | How often to poll each app's registry. The `/deploy` hint can short-circuit to 1s. |
+| `trusted_proxies` | `172.16.0.0/12` | CIDR ranges of trusted reverse proxies for rate limiting. X-Forwarded-For from these IPs is used to identify the real client. |
 
-# CIDR ranges of trusted reverse proxies for rate limiting.
-# When set, X-Forwarded-For from these IPs is used to identify the real client.
-# Typical Docker bridge: ["172.16.0.0/12"].
-trusted_proxies:
-  - "172.16.0.0/12"
+### `apps` table — per-app config
 
-apps:
-  myapp:
-    # Base image path in GHCR (without tag).
-    image: "ghcr.io/yourorg/myapp"
+| Column | Default | Description |
+|--------|---------|-------------|
+| `name` | (primary key) | App name used in container DNS and CLI commands. |
+| `image` | required | Base image path in GHCR (without tag). |
+| `tag_pattern` | required | Glob pattern for tags to watch (`path.Match` rules). `v*` matches `v1.0.0`, etc. |
+| `allowed_identity` | required | GitHub org/repo whose Sigstore identity must have signed the image. |
+| `artifact` | required | OCI artifact reference for compose files. Use `{tag}` as a placeholder for the image tag being deployed. |
+| `domain` | required | Public domain for Caddyfile generation. Must be lowercase (e.g. `myapp.example.com`). |
+| `dir` | `/srv/apps/{name}` | Absolute path to the app directory on the VPS. |
+| `port` | `8080` | Port the app's web container listens on. Caddy routes via container DNS: `{name}-web-1:{port}`. |
+| `tls` | `false` | `true` → furnace generates a local cert; Caddy serves `tls /certs/local.pem /certs/local-key.pem`. `false` → relies on Cloudflare Tunnel or external TLS termination. |
+| `env_file` | `.deploy.env` | Env file written by furnace on each deploy. |
+| `image_var` | `APP_IMAGE` | Env variable in `env_file` set to the deployed image reference. |
+| `container` | (required) | Docker container name for health checking via the Docker API. |
+| `health_timeout` | `30s` | How long to wait for the container HEALTHCHECK to report healthy after `docker compose up`. |
+| `keep_releases` | `5` | Number of old release directories to retain under `.furnace/releases/`. |
 
-    # Glob pattern for tags to watch (path.Match rules). "v*" matches v1.0.0, etc.
-    tag_pattern: "v*"
-
-    # GitHub org/repo whose Sigstore identity must have signed the image.
-    allowed_identity: "yourorg/myapp"
-
-    # Public domain for Caddyfile generation. Must be lowercase (e.g. myapp.example.com).
-    domain: "myapp.example.com"
-
-    # Absolute path to the app directory on the VPS (default: /srv/apps/{name}).
-    dir: "/srv/apps/myapp"
-
-    # Port the app's web container listens on (default: 8080).
-    # Caddy routes via container DNS: {name}-web-1:{port}
-    port: 8080
-
-    # TLS mode for this app (default: false).
-    # true  → furnace generates a local cert; Caddy serves tls /certs/local.pem /certs/local-key.pem
-    # false → no TLS directive; relies on Cloudflare Tunnel or external TLS termination
-    tls: false
-
-    # Env file and variable written by furnace on each deploy.
-    env_file: ".deploy.env"    # default
-    image_var: "APP_IMAGE"     # default
-
-    # Health check endpoint polled after docker compose up.
-    # Uses container DNS — app containers are reachable on caddy_net.
-    health_url: "http://myapp-web-1:8080/healthz"
-    health_timeout: "30s"
-
-    # OCI artifact reference for compose files (required).
-    # The worker fetches and Sigstore-verifies compose files from this OCI artifact
-    # before each deploy, staging them in .furnace/releases/. The artifact must be
-    # signed with the same allowed_identity as the app image. Use {tag} as a
-    # placeholder for the image tag being deployed.
-    artifact: "ghcr.io/yourorg/myapp:{tag}-compose"
-
-    # Number of old release directories to retain under .furnace/releases/ (default: 5).
-    keep_releases: 5
-```
-
-Use `furnace validate` to check your config file for errors without starting the worker.
+Health checking uses the Docker HEALTHCHECK API — the worker polls the container's health status directly rather than making HTTP requests to a URL.
 
 ## Data Layout
 
 ```
 /etc/furnace/
-  furnace.yaml              # app configuration
-  registry-token.cred       # encrypted registry token (created by --credential)
+  registry-token.cred       # encrypted registry token (created by --credential-stdin)
 
 /var/lib/furnace/
+  furnace.db                # SQLite database (apps, deployments, config)
+  furnace.db-wal            # WAL journal
+  furnace.db-shm            # shared memory
   ca/
     ca.pem                  # furnace CA certificate (created by mkcert --install)
     ca-key.pem              # furnace CA private key (0600)
-  deployments/
-    myapp/
-      01JVABCDEF....json    # per-deployment records (latest 20 kept)
+  state/
+    myapp.json              # worker poll state (last polled version per app)
   audit/
     myapp.jsonl             # append-only JSONL audit log
   locks/

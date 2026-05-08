@@ -5,16 +5,17 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
 // Encrypt encrypts a plaintext token via systemd-creds and writes
-// ciphertext to /etc/furnace/registry-token.cred.
-func Encrypt(token string) error {
-	if err := os.MkdirAll("/etc/furnace", 0755); err != nil {
-		return fmt.Errorf("create /etc/furnace: %w", err)
+// ciphertext to credPath.
+func Encrypt(token, credPath string) error {
+	if err := os.MkdirAll(filepath.Dir(credPath), 0750); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(credPath), err)
 	}
-	cmd := exec.Command("systemd-creds", "encrypt", "-", "/etc/furnace/registry-token.cred")
+	cmd := exec.Command("systemd-creds", "encrypt", "-", credPath)
 	cmd.Stdin = strings.NewReader(token)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("systemd-creds encrypt: %w: %s", err, out)

@@ -1,12 +1,16 @@
 package storage
 
 import (
+	_ "embed"
 	"database/sql"
 	"fmt"
 	"log/slog"
 
 	_ "modernc.org/sqlite"
 )
+
+//go:embed sql/schema.sql
+var schemaSQL string
 
 // OpenDB opens (or creates) the furnace SQLite database at path.
 // readOnly=true uses mode=ro DSN and skips schema migration.
@@ -28,6 +32,11 @@ func OpenDB(path string, readOnly bool, logger *slog.Logger) (*sql.DB, error) {
 		db.SetMaxOpenConns(2)
 	} else {
 		db.SetMaxOpenConns(1)
+	}
+
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("sqlite ping: %w", err)
 	}
 
 	pragmas := []string{
@@ -55,23 +64,6 @@ func OpenDB(path string, readOnly bool, logger *slog.Logger) (*sql.DB, error) {
 }
 
 func migrateSchema(db *sql.DB) error {
-	_, err := db.Exec(`
-CREATE TABLE IF NOT EXISTS deployments (
-    id              TEXT PRIMARY KEY,
-    app_name        TEXT NOT NULL,
-    image           TEXT NOT NULL,
-    tag             TEXT NOT NULL DEFAULT '',
-    digest          TEXT NOT NULL DEFAULT '',
-    artifact_digest TEXT NOT NULL DEFAULT '',
-    prev_image      TEXT NOT NULL DEFAULT '',
-    status          TEXT NOT NULL,
-    started_at      TEXT NOT NULL,
-    ended_at        TEXT NOT NULL DEFAULT '',
-    error           TEXT NOT NULL DEFAULT ''
-);
-
-CREATE INDEX IF NOT EXISTS idx_deployments_app_started
-    ON deployments (app_name, started_at DESC);
-`)
+	_, err := db.Exec(schemaSQL)
 	return err
 }

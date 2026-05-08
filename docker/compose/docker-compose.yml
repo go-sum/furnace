@@ -3,8 +3,6 @@ services:
     image: ${APP_IMAGE}
     restart: unless-stopped
     volumes:
-      - /etc/furnace/furnace.yaml:/etc/furnace/furnace.yaml:ro
-      - /var/lib/furnace:/var/lib/furnace:ro
       - /var/lib/furnace/hints:/var/lib/furnace/hints
       - /var/lib/furnace/furnace.db:/var/lib/furnace/furnace.db
       - /var/lib/furnace/furnace.db-wal:/var/lib/furnace/furnace.db-wal

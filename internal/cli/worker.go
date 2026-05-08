@@ -8,12 +8,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/docker/docker/client"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/spf13/cobra"
 
-	"github.com/go-sum/furnace/internal/app"
 	"github.com/go-sum/furnace/internal/audit"
 	"github.com/go-sum/furnace/internal/creds"
 	"github.com/go-sum/furnace/internal/deploy"
@@ -24,13 +24,13 @@ import (
 	"github.com/go-sum/furnace/internal/worker"
 )
 
-func newWorkerCmd(configPath *string) *cobra.Command {
+func newWorkerCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "worker",
 		Short: "Manage the furnace deployment worker",
 	}
 	cmd.AddCommand(
-		newWorkerRunCmd(configPath),
+		newWorkerRunCmd(),
 		newWorkerStopCmd(),
 		newWorkerStatusCmd(),
 		newWorkerLogsCmd(),
@@ -38,7 +38,7 @@ func newWorkerCmd(configPath *string) *cobra.Command {
 	return cmd
 }
 
-func newWorkerRunCmd(configPath *string) *cobra.Command {
+func newWorkerRunCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "run",
 		Short: "Run the furnace-worker poll loop (used by systemd)",
@@ -49,15 +49,38 @@ func newWorkerRunCmd(configPath *string) *cobra.Command {
 
 			logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-			cfg, err := app.LoadConfig(*configPath)
+			db, err := storage.OpenDB(DBPath, false, logger)
 			if err != nil {
-				return fmt.Errorf("load config: %w", err)
+				return fmt.Errorf("open db: %w", err)
+			}
+			defer db.Close()
+
+			appStore := storage.NewSQLiteAppStore(db, logger)
+
+			dataDir, _, err := appStore.GetConfigValue(ctx, "data_dir")
+			if err != nil {
+				return fmt.Errorf("get data_dir: %w", err)
+			}
+			if dataDir == "" {
+				dataDir = DataDir
 			}
 
-			apps := make(map[string]model.AppConfig, len(cfg.Apps))
-			for name := range cfg.Apps {
-				appCfg, _ := cfg.AppConfig(name)
-				apps[name] = appCfg
+			pollIntervalStr, _, err := appStore.GetConfigValue(ctx, "poll_interval")
+			if err != nil {
+				return fmt.Errorf("get poll_interval: %w", err)
+			}
+			pollInterval, err := time.ParseDuration(pollIntervalStr)
+			if err != nil || pollInterval == 0 {
+				pollInterval = time.Minute
+			}
+
+			appList, err := appStore.ListApps(ctx)
+			if err != nil {
+				return fmt.Errorf("list apps: %w", err)
+			}
+			apps := make(map[string]model.AppConfig, len(appList))
+			for _, a := range appList {
+				apps[a.Name] = a
 			}
 
 			token, err := creds.LoadFromCredentialsDir()
@@ -92,17 +115,11 @@ func newWorkerRunCmd(configPath *string) *cobra.Command {
 			}
 			defer dockerClient.Close()
 
-			db, err := storage.OpenDB(filepath.Join(cfg.DataDir, "furnace.db"), false, logger)
-			if err != nil {
-				return fmt.Errorf("open db: %w", err)
-			}
-			defer db.Close()
-
-			lock := deploy.NewFileLock(filepath.Join(cfg.DataDir, "locks"))
+			lock := deploy.NewFileLock(filepath.Join(dataDir, "locks"))
 			health := deploy.NewDockerHealthChecker(dockerClient)
 			store := storage.NewSQLiteDeploymentStore(db, logger)
 
-			auditLogger, err := audit.NewFileLogger(filepath.Join(cfg.DataDir, "audit"))
+			auditLogger, err := audit.NewFileLogger(filepath.Join(dataDir, "audit"))
 			if err != nil {
 				return fmt.Errorf("create audit logger: %w", err)
 			}
@@ -114,7 +131,7 @@ func newWorkerRunCmd(configPath *string) *cobra.Command {
 				Health:   health,
 				Store:    store,
 				Audit:    auditLogger,
-				DataDir:  cfg.DataDir,
+				DataDir:  dataDir,
 				Logger:   logger,
 				Context:  ctx,
 				Releases: releases,
@@ -123,8 +140,8 @@ func newWorkerRunCmd(configPath *string) *cobra.Command {
 
 			w := worker.New(worker.Config{
 				Apps:            apps,
-				PollInterval:    cfg.PollInterval,
-				DataDir:         cfg.DataDir,
+				PollInterval:    pollInterval,
+				DataDir:         dataDir,
 				Registry:        reg,
 				Verifier:        verifier,
 				Deployer:        svc,
@@ -135,7 +152,7 @@ func newWorkerRunCmd(configPath *string) *cobra.Command {
 
 			logger.Info("furnace-worker starting",
 				"apps", len(apps),
-				"poll_interval", cfg.PollInterval,
+				"poll_interval", pollInterval,
 			)
 			return w.Run(ctx)
 		},

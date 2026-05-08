@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -10,15 +12,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/go-sum/furnace/deploy"
-	"github.com/go-sum/furnace/internal/app"
+	"github.com/go-sum/furnace/internal/model"
+	"github.com/go-sum/furnace/internal/storage"
 )
 
-const (
-	workerUnitDest = "/etc/systemd/system/furnace-worker.service"
-	proxyDir       = "/srv/furnace/proxy"
-)
-
-func newStartCmd(configPath *string) *cobra.Command {
+func newStartCmd() *cobra.Command {
 	var credentialStdin bool
 	cmd := &cobra.Command{
 		Use:   "start",
@@ -39,25 +37,29 @@ func newStartCmd(configPath *string) *cobra.Command {
 					return fmt.Errorf("--credential-stdin provided but stdin was empty")
 				}
 			}
-			return runStart(*configPath, credential)
+			return runStart(cmd.Context(), credential)
 		},
 	}
 	cmd.Flags().BoolVar(&credentialStdin, "credential-stdin", false, "read registry token from stdin")
 	return cmd
 }
 
-func runStart(configPath, credential string) error {
-	cfg, err := app.LoadConfig(configPath)
+func runStart(ctx context.Context, credential string) error {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	db, err := storage.OpenDB(DBPath, true, logger)
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return fmt.Errorf("open db: %w", err)
 	}
-	if configPath == furnaceConfigPath {
-		if err := ensureWebReadableConfig(configPath); err != nil {
-			return fmt.Errorf("ensure web-readable config: %w", err)
-		}
+	defer db.Close()
+
+	appStore := storage.NewSQLiteAppStore(db, logger)
+	apps, err := appStore.ListApps(ctx)
+	if err != nil {
+		return fmt.Errorf("list apps: %w", err)
 	}
 
-	if err := writeProxyFiles(cfg); err != nil {
+	if err := writeProxyFiles(apps); err != nil {
 		return fmt.Errorf("write proxy files: %w", err)
 	}
 
@@ -70,36 +72,36 @@ func runStart(configPath, credential string) error {
 	}
 
 	fmt.Println("furnace started")
-	fmt.Println("  proxy:  docker compose up -d (/srv/furnace/proxy)")
+	fmt.Println("  proxy:  docker compose up -d (" + ProxyDir + ")")
 	fmt.Println("  worker: systemctl enable --now furnace-worker")
 	return nil
 }
 
-func writeProxyFiles(cfg *app.Config) error {
-	if err := os.MkdirAll(proxyDir, 0755); err != nil {
+func writeProxyFiles(apps []model.AppConfig) error {
+	if err := os.MkdirAll(ProxyDir, 0755); err != nil {
 		return fmt.Errorf("create proxy dir: %w", err)
 	}
 
-	composePath := proxyDir + "/compose.yml"
+	composePath := ProxyDir + "/compose.yml"
 	if err := os.WriteFile(composePath, deploy.ProxyComposeYML, 0644); err != nil {
 		return fmt.Errorf("write compose.yml: %w", err)
 	}
 	fmt.Printf("wrote %s\n", composePath)
 
-	caddyfile, err := generateCaddyfile(cfg)
+	caddyfile, err := generateCaddyfile(apps)
 	if err != nil {
 		return fmt.Errorf("generate Caddyfile: %w", err)
 	}
-	caddyPath := proxyDir + "/Caddyfile"
+	caddyPath := ProxyDir + "/Caddyfile"
 	if err := os.WriteFile(caddyPath, caddyfile, 0644); err != nil {
 		return fmt.Errorf("write Caddyfile: %w", err)
 	}
-	fmt.Printf("wrote %s (%d apps)\n", caddyPath, len(cfg.Apps))
+	fmt.Printf("wrote %s (%d apps)\n", caddyPath, len(apps))
 	return nil
 }
 
 func dockerComposeUp() error {
-	c := exec.Command("docker", "compose", "-f", proxyDir+"/compose.yml", "up", "-d")
+	c := exec.Command("docker", "compose", "-f", ProxyDir+"/compose.yml", "up", "-d")
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	return c.Run()

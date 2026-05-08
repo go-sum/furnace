@@ -11,7 +11,7 @@ import (
 // systemd unit, and enables/starts the service.
 func installWorker(credential string) error {
 	if credential != "" {
-		if err := creds.Encrypt(credential); err != nil {
+		if err := creds.Encrypt(credential, CredPath); err != nil {
 			return fmt.Errorf("encrypt credential: %w", err)
 		}
 	}
@@ -20,10 +20,10 @@ func installWorker(credential string) error {
 	if err != nil {
 		return fmt.Errorf("render worker unit: %w", err)
 	}
-	if err := os.WriteFile(workerUnitDest, unitBytes, 0644); err != nil {
+	if err := os.WriteFile(WorkerUnitDest, unitBytes, 0644); err != nil {
 		return fmt.Errorf("write systemd unit: %w", err)
 	}
-	fmt.Printf("wrote %s\n", workerUnitDest)
+	fmt.Printf("wrote %s\n", WorkerUnitDest)
 
 	if err := systemctl("daemon-reload"); err != nil {
 		return fmt.Errorf("daemon-reload: %w", err)

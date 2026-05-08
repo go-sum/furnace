@@ -42,35 +42,35 @@ func runReset() error {
 	_ = exec.Command("systemctl", "disable", "furnace-worker").Run()
 	fmt.Println("disabled furnace-worker")
 
-	if err := os.Remove("/etc/systemd/system/furnace-worker.service"); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(WorkerUnitDest); err != nil && !errors.Is(err, os.ErrNotExist) {
 		fmt.Printf("warn: remove service file: %v\n", err)
 	}
-	fmt.Println("removed  /etc/systemd/system/furnace-worker.service")
+	fmt.Printf("removed  %s\n", WorkerUnitDest)
 
 	_ = systemctl("daemon-reload")
 	fmt.Println("reloaded systemd daemon")
 
-	if err := os.Remove("/etc/furnace/registry-token.cred"); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(CredPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		fmt.Printf("warn: remove registry credential: %v\n", err)
 	}
-	fmt.Println("removed  /etc/furnace/registry-token.cred")
+	fmt.Printf("removed  %s\n", CredPath)
 
-	if err := os.RemoveAll("/var/lib/furnace/.docker"); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.RemoveAll(DataDir + "/.docker"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		fmt.Printf("warn: remove docker config: %v\n", err)
 	}
-	fmt.Println("removed  /var/lib/furnace/.docker")
+	fmt.Printf("removed  %s/.docker\n", DataDir)
 
-	_ = exec.Command("docker", "compose", "-f", "/srv/furnace/proxy/compose.yml", "down").Run()
+	_ = exec.Command("docker", "compose", "-f", ProxyDir+"/compose.yml", "down").Run()
 	fmt.Println("stopped  proxy")
 
 	_ = exec.Command("docker", "network", "rm", "caddy_net").Run()
 	fmt.Println("removed  docker network caddy_net")
 
-	_ = os.Remove("/usr/local/share/ca-certificates/furnace-ca.crt")
+	_ = os.Remove(SystemCADest)
 	_ = exec.Command("update-ca-certificates").Run()
 	fmt.Println("removed  system CA")
 
-	for _, dir := range []string{"/etc/furnace", "/var/lib/furnace", "/srv/apps", "/srv/furnace"} {
+	for _, dir := range []string{CredDir, DataDir, AppsDir, InfraDir} {
 		_ = os.RemoveAll(dir)
 		fmt.Printf("removed  %s\n", dir)
 	}

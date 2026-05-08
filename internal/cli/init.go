@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/user"
@@ -10,7 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	furnaceconfig "github.com/go-sum/furnace/config"
+	"github.com/go-sum/furnace/internal/storage"
 )
 
 type dirOwner int
@@ -28,11 +30,11 @@ type dirSpec struct {
 }
 
 var managedDirs = []dirSpec{
-	{"/etc/furnace", ownerRootFurnace, 0750},
-	{"/var/lib/furnace", ownerFurnace, 0755},
-	{"/srv/apps", ownerFurnace, 0755},
-	{"/srv/furnace/proxy", ownerFurnace, 0755},
-	{"/srv/furnace/certs", ownerFurnace, 0755},
+	{CredDir, ownerRootFurnace, 0750},
+	{DataDir, ownerFurnace, 0755},
+	{AppsDir, ownerFurnace, 0755},
+	{ProxyDir, ownerFurnace, 0755},
+	{CertsDir, ownerFurnace, 0755},
 }
 
 func newInitCmd() *cobra.Command {
@@ -41,12 +43,12 @@ func newInitCmd() *cobra.Command {
 		Short: "Initialize the VPS for furnace (requires root)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runInit()
+			return runInit(cmd.Context())
 		},
 	}
 }
 
-func runInit() error {
+func runInit(ctx context.Context) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("furnace init requires root privileges (run with sudo)")
 	}
@@ -68,10 +70,6 @@ func runInit() error {
 		}
 	}
 
-	if err := ensureConfigScaffold(gid); err != nil {
-		return fmt.Errorf("config scaffold: %w", err)
-	}
-
 	if err := ensureDockerGroup(); err != nil {
 		return fmt.Errorf("docker group: %w", err)
 	}
@@ -80,6 +78,46 @@ func runInit() error {
 		return fmt.Errorf("docker network: %w", err)
 	}
 
+	if err := ensureSQLiteFiles(DBPath, uid, gid); err != nil {
+		return fmt.Errorf("sqlite files: %w", err)
+	}
+
+	if err := ensureDBSeed(ctx, DBPath, slog.Default()); err != nil {
+		return fmt.Errorf("db seed: %w", err)
+	}
+
+	return nil
+}
+
+func ensureDBSeed(ctx context.Context, dbPath string, logger *slog.Logger) error {
+	db, err := storage.OpenDB(dbPath, false, logger)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer db.Close()
+	return storage.SeedIfEmpty(ctx, db, DataDir, AppsDir)
+}
+
+// ensureSQLiteFiles pre-creates the three SQLite WAL-mode files so that
+// Docker bind-mounts them as files rather than directories when the web
+// container starts for the first time.
+func ensureSQLiteFiles(dbPath string, uid, gid int) error {
+	paths := []string{dbPath, dbPath + "-wal", dbPath + "-shm"}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			fmt.Printf("exists   %s\n", p)
+			continue
+		}
+		f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL, 0644)
+		if err != nil {
+			return fmt.Errorf("create %s: %w", p, err)
+		}
+		f.Close()
+		if err := os.Chown(p, uid, gid); err != nil {
+			return fmt.Errorf("chown %s: %w", p, err)
+		}
+		fmt.Printf("created  %s\n", p)
+	}
 	return nil
 }
 
@@ -155,24 +193,4 @@ func ensureDir(path string, mode os.FileMode) (created bool, err error) {
 		return false, nil
 	}
 	return true, os.MkdirAll(path, mode)
-}
-
-func ensureConfigScaffold(gid int) error {
-	if _, err := os.Stat(furnaceConfigPath); err == nil {
-		fmt.Printf("exists   %s (not overwritten)\n", furnaceConfigPath)
-		_ = os.Chown(furnaceConfigPath, 0, gid) // best-effort: file already exists; ownership adjustment is advisory
-		_ = ensureWebReadableConfig(furnaceConfigPath)
-		return nil
-	}
-	if err := os.WriteFile(furnaceConfigPath, furnaceconfig.ExampleConfig, 0644); err != nil {
-		return err
-	}
-	if err := os.Chown(furnaceConfigPath, 0, gid); err != nil {
-		return fmt.Errorf("chown config: %w", err)
-	}
-	if err := ensureWebReadableConfig(furnaceConfigPath); err != nil {
-		return err
-	}
-	fmt.Printf("created  %s\n", furnaceConfigPath)
-	return nil
 }

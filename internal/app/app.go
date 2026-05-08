@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -13,32 +15,38 @@ import (
 	"github.com/go-sum/foundry/pkg/web/serve"
 
 	"github.com/go-sum/furnace/internal/handler"
-	"github.com/go-sum/furnace/internal/model"
 	"github.com/go-sum/furnace/internal/storage"
 )
 
 type App struct {
 	Handler web.Handler
-	Config  *Config
 	Logger  *slog.Logger
 }
 
-func New(cfg *Config, db *sql.DB, logger *slog.Logger) (*App, error) {
-	store := storage.NewSQLiteDeploymentStore(db, logger)
+func New(ctx context.Context, db *sql.DB, fallbackDataDir string, logger *slog.Logger) (*App, error) {
+	appStore := storage.NewSQLiteAppStore(db, logger)
+	deployStore := storage.NewSQLiteDeploymentStore(db, logger)
 
-	apps := make(map[string]model.AppConfig, len(cfg.Apps))
-	for name := range cfg.Apps {
-		appCfg, _ := cfg.AppConfig(name)
-		apps[name] = appCfg
+	dataDir, _, err := appStore.GetConfigValue(ctx, "data_dir")
+	if err != nil {
+		return nil, fmt.Errorf("get data_dir: %w", err)
 	}
-	appNames := make(map[string]struct{}, len(apps))
-	for name := range apps {
-		appNames[name] = struct{}{}
+	if dataDir == "" {
+		dataDir = fallbackDataDir
+	}
+
+	var trustedProxies []string
+	if raw, found, err := appStore.GetConfigValue(ctx, "trusted_proxies"); err != nil {
+		return nil, fmt.Errorf("get trusted_proxies: %w", err)
+	} else if found {
+		if err := json.Unmarshal([]byte(raw), &trustedProxies); err != nil {
+			return nil, fmt.Errorf("parse trusted_proxies: %w", err)
+		}
 	}
 
 	handlers := Handlers{
-		Hint:   handler.NewHintHandler(cfg.DataDir, appNames),
-		Status: handler.NewStatusHandler(newStatusReader(appNames, store)),
+		Hint:   handler.NewHintHandler(dataDir, appStore),
+		Status: handler.NewStatusHandler(newStatusReader(appStore, deployStore)),
 		Health: handler.NewHealthHandler(),
 	}
 
@@ -54,7 +62,7 @@ func New(cfg *Config, db *sql.DB, logger *slog.Logger) (*App, error) {
 		return nil, fmt.Errorf("create rate limiter: %w", err)
 	}
 
-	keyFunc, err := ratelimit.KeyFuncFromTrustedProxies(cfg.TrustedProxies)
+	keyFunc, err := ratelimit.KeyFuncFromTrustedProxies(trustedProxies)
 	if err != nil {
 		return nil, fmt.Errorf("create rate limit key func: %w", err)
 	}
@@ -81,9 +89,5 @@ func New(cfg *Config, db *sql.DB, logger *slog.Logger) (*App, error) {
 
 	RegisterRoutes(rt, handlers)
 
-	return &App{
-		Handler: rt.Serve,
-		Config:  cfg,
-		Logger:  logger,
-	}, nil
+	return &App{Handler: rt.Serve, Logger: logger}, nil
 }

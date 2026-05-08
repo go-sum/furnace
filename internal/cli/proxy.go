@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sort"
@@ -10,8 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/go-sum/furnace/deploy"
-	"github.com/go-sum/furnace/internal/app"
+	"github.com/go-sum/furnace/internal/model"
+	"github.com/go-sum/furnace/internal/storage"
 )
 
 const caddyfileTmpl = `{
@@ -25,13 +26,13 @@ const caddyfileTmpl = `{
 }
 {{end}}`
 
-func newProxyCmd(configPath *string) *cobra.Command {
+func newProxyCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "proxy",
 		Short: "Manage the Caddy reverse proxy",
 	}
 	cmd.AddCommand(
-		newProxyInitCmd(configPath),
+		newProxyInitCmd(),
 		newProxyUpCmd(),
 		newProxyStatusCmd(),
 		newProxyDownCmd(),
@@ -40,33 +41,28 @@ func newProxyCmd(configPath *string) *cobra.Command {
 	return cmd
 }
 
-func newProxyInitCmd(configPath *string) *cobra.Command {
+func newProxyInitCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "init",
 		Short: "Generate Caddyfile and compose.yml from current app config",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := app.LoadConfig(*configPath)
+			ctx := cmd.Context()
+			logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+			db, err := storage.OpenDB(DBPath, true, logger)
 			if err != nil {
-				return fmt.Errorf("load config: %w", err)
+				return fmt.Errorf("open db: %w", err)
+			}
+			defer db.Close()
+
+			appStore := storage.NewSQLiteAppStore(db, logger)
+			apps, err := appStore.ListApps(ctx)
+			if err != nil {
+				return fmt.Errorf("list apps: %w", err)
 			}
 
-			composePath := proxyDir + "/compose.yml"
-			if err := os.WriteFile(composePath, deploy.ProxyComposeYML, 0644); err != nil {
-				return fmt.Errorf("write compose.yml: %w", err)
-			}
-			fmt.Printf("wrote %s\n", composePath)
-
-			caddyfile, err := generateCaddyfile(cfg)
-			if err != nil {
-				return fmt.Errorf("generate Caddyfile: %w", err)
-			}
-			caddyPath := proxyDir + "/Caddyfile"
-			if err := os.WriteFile(caddyPath, caddyfile, 0644); err != nil {
-				return fmt.Errorf("write Caddyfile: %w", err)
-			}
-			fmt.Printf("wrote %s (%d apps)\n", caddyPath, len(cfg.Apps))
-			return nil
+			return writeProxyFiles(apps)
 		},
 	}
 }
@@ -78,7 +74,7 @@ func newProxyUpCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c := exec.Command("docker", "compose", "up", "-d")
-			c.Dir = "/srv/furnace/proxy"
+			c.Dir = ProxyDir
 			c.Stdout = os.Stdout
 			c.Stderr = os.Stderr
 			return c.Run()
@@ -93,7 +89,7 @@ func newProxyStatusCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c := exec.Command("docker", "compose", "ps")
-			c.Dir = "/srv/furnace/proxy"
+			c.Dir = ProxyDir
 			c.Stdout = os.Stdout
 			c.Stderr = os.Stderr
 			return c.Run()
@@ -118,7 +114,7 @@ func newProxyDownCmd() *cobra.Command {
 		Short: "Stop the Caddy reverse proxy",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			c := exec.Command("docker", "compose", "-f", "/srv/furnace/proxy/compose.yml", "down")
+			c := exec.Command("docker", "compose", "-f", ProxyDir+"/compose.yml", "down")
 			c.Stdout = os.Stdout
 			c.Stderr = os.Stderr
 			return c.Run()
@@ -133,7 +129,7 @@ func newProxyLogsCmd() *cobra.Command {
 		Short: "Show Caddy reverse proxy logs",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			args := []string{"compose", "-f", "/srv/furnace/proxy/compose.yml", "logs"}
+			args := []string{"compose", "-f", ProxyDir + "/compose.yml", "logs"}
 			if follow {
 				args = append(args, "-f")
 			}
@@ -147,22 +143,14 @@ func newProxyLogsCmd() *cobra.Command {
 	return cmd
 }
 
-func generateCaddyfile(cfg *app.Config) ([]byte, error) {
-	names := make([]string, 0, len(cfg.Apps))
-	for name := range cfg.Apps {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+func generateCaddyfile(apps []model.AppConfig) ([]byte, error) {
+	sorted := make([]model.AppConfig, len(apps))
+	copy(sorted, apps)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 
-	apps := make([]caddyApp, 0, len(names))
-	for _, name := range names {
-		appCfg, _ := cfg.AppConfig(name)
-		apps = append(apps, caddyApp{
-			Name:   name,
-			Domain: appCfg.Domain,
-			Port:   appCfg.Port,
-			TLS:    appCfg.TLS,
-		})
+	caddyApps := make([]caddyApp, len(sorted))
+	for i, a := range sorted {
+		caddyApps[i] = caddyApp{Name: a.Name, Domain: a.Domain, Port: a.Port, TLS: a.TLS}
 	}
 
 	tmpl, err := template.New("caddyfile").Parse(caddyfileTmpl)
@@ -170,7 +158,7 @@ func generateCaddyfile(cfg *app.Config) ([]byte, error) {
 		return nil, err
 	}
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, caddyfileData{Apps: apps}); err != nil {
+	if err := tmpl.Execute(&buf, caddyfileData{Apps: caddyApps}); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
