@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+ARG GO_VERSION=1.26
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
 
 WORKDIR /src
 ARG TARGETOS
@@ -21,11 +22,11 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -o /usr/local/bin/furnace-web ./cmd/furnace-web
 
 # healthcheck_builder: stdlib-only binary, isolated go.mod, no workspace deps.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS healthcheck_builder
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS healthcheck_builder
 WORKDIR /build
 ARG TARGETOS
 ARG TARGETARCH
-COPY docker/healthcheck.go main.go
+COPY deploy/healthcheck/healthcheck.go main.go
 RUN --mount=type=cache,target=/root/.cache/go-build \
     printf 'module healthcheck\ngo 1.26\n' > go.mod && \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags='-s -w' -o /healthcheck .

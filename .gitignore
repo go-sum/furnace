@@ -12,4 +12,5 @@ tmp/
 *.test
 *.out
 
-furnace
+/furnace
+/furnace-web

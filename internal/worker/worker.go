@@ -9,8 +9,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/go-sum/furnace/internal/deploy"
+	"github.com/go-sum/furnace/internal/artifact"
 	"github.com/go-sum/furnace/internal/model"
+	"github.com/go-sum/furnace/internal/release"
 )
 
 // RegistryClient polls a container registry for new image versions.
@@ -45,7 +46,7 @@ type Config struct {
 	Verifier        SignatureVerifier
 	Deployer        Deployer
 	ArtifactFetcher ArtifactFetcher
-	Releases        *deploy.ReleaseManager
+	Releases        *release.ReleaseManager
 	Logger          *slog.Logger
 }
 
@@ -59,7 +60,7 @@ type Worker struct {
 	verifier        SignatureVerifier
 	deployer        Deployer
 	artifactFetcher ArtifactFetcher
-	releases        *deploy.ReleaseManager
+	releases        *release.ReleaseManager
 	logger          *slog.Logger
 	states          *stateStore
 	backoffs        map[string]*backoff
@@ -178,7 +179,7 @@ func (w *Worker) pollApp(ctx context.Context, app model.AppConfig) error {
 		return fmt.Errorf("load state: %w", err)
 	}
 	if state != nil && state.Digest == digest {
-		artifactRef := deploy.ResolveArtifactRef(app.Artifact, tag)
+		artifactRef := artifact.ResolveArtifactRef(app.Artifact, tag)
 		currentArtDigest, err := w.artifactFetcher.ResolveDigest(ctx, artifactRef)
 		if err != nil {
 			return fmt.Errorf("resolve artifact digest: %w", err)
@@ -196,7 +197,7 @@ func (w *Worker) pollApp(ctx context.Context, app model.AppConfig) error {
 		w.logger.Info("signature verified", "app", app.Name, "tag", tag)
 	}
 
-	artifactRef := deploy.ResolveArtifactRef(app.Artifact, tag)
+	artifactRef := artifact.ResolveArtifactRef(app.Artifact, tag)
 
 	stagingDir, err := w.releases.CreateStagingDir(app.Dir)
 	if err != nil {

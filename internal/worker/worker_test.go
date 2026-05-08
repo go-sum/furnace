@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-sum/furnace/internal/deploy"
 	"github.com/go-sum/furnace/internal/model"
+	"github.com/go-sum/furnace/internal/release"
 )
 
 type fakeRegistry struct {
@@ -142,7 +142,7 @@ func newTestWorker(t *testing.T, reg RegistryClient, ver SignatureVerifier, fetc
 	if err := os.MkdirAll(appDir, 0750); err != nil {
 		t.Fatalf("mkdir app dir: %v", err)
 	}
-	rm := deploy.NewReleaseManager(slog.Default())
+	rm := release.NewReleaseManager(slog.Default())
 	w := New(Config{
 		Apps:            map[string]model.AppConfig{"myapp": testApp(appDir)},
 		PollInterval:    time.Minute,

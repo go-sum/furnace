@@ -1,4 +1,4 @@
-package deploy
+package deployer
 
 import (
 	"context"
@@ -13,10 +13,22 @@ import (
 	"time"
 
 	"github.com/go-sum/furnace/internal/audit"
+	"github.com/go-sum/furnace/internal/container"
 	"github.com/go-sum/furnace/internal/model"
+	"github.com/go-sum/furnace/internal/release"
 	"github.com/go-sum/furnace/internal/storage"
 	"github.com/oklog/ulid/v2"
 )
+
+// CommandExecutor runs sandboxed docker compose commands.
+type CommandExecutor interface {
+	Exec(ctx context.Context, dir string, args []string) ([]byte, error)
+}
+
+// HealthChecker polls a container until it becomes healthy or the timeout elapses.
+type HealthChecker interface {
+	Check(ctx context.Context, containerName string, timeout time.Duration) error
+}
 
 type Service struct {
 	apps     map[string]model.AppConfig
@@ -27,7 +39,7 @@ type Service struct {
 	audit    audit.Logger
 	dataDir  string
 	logger   *slog.Logger
-	releases *ReleaseManager
+	releases *release.ReleaseManager
 	ctx      context.Context
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
@@ -45,7 +57,7 @@ type ServiceConfig struct {
 	DataDir  string
 	Logger   *slog.Logger
 	Context  context.Context
-	Releases *ReleaseManager
+	Releases *release.ReleaseManager
 }
 
 func NewService(cfg ServiceConfig) *Service {
@@ -107,7 +119,7 @@ func (s *Service) Start(ctx context.Context, req model.DeployRequest) (*model.De
 		return nil, fmt.Errorf("%w: %q", model.ErrImageInvalid, req.Image)
 	}
 
-	release, err := s.lock.Acquire(ctx, req.AppName)
+	deployRelease, err := s.lock.Acquire(ctx, req.AppName)
 	if err != nil {
 		s.wg.Done()
 		return nil, err
@@ -129,7 +141,7 @@ func (s *Service) Start(ctx context.Context, req model.DeployRequest) (*model.De
 	}
 
 	if err := s.store.Save(ctx, deployment); err != nil {
-		release()
+		deployRelease()
 		s.wg.Done()
 		return nil, fmt.Errorf("record deployment: %w", err)
 	}
@@ -145,12 +157,12 @@ func (s *Service) Start(ctx context.Context, req model.DeployRequest) (*model.De
 	})
 
 	snapshot := *deployment
-	go s.execute(app, deployment, release)
+	go s.execute(app, deployment, deployRelease)
 	return &snapshot, nil
 }
 
-func (s *Service) execute(app model.AppConfig, deployment *model.Deployment, release func()) {
-	defer release()
+func (s *Service) execute(app model.AppConfig, deployment *model.Deployment, deployRelease func()) {
+	defer deployRelease()
 	defer s.wg.Done()
 	defer func() {
 		if r := recover(); r != nil {
@@ -196,7 +208,7 @@ func (s *Service) execute(app model.AppConfig, deployment *model.Deployment, rel
 	deployment.Status = model.StatusPulling
 	s.saveState(ctx, deployment)
 
-	output, err := s.executor.Exec(ctx, app.Dir, ComposePullArgs(app, composeFiles))
+	output, err := s.executor.Exec(ctx, app.Dir, container.ComposePullArgs(app, composeFiles))
 	if err != nil {
 		s.failDeployment(ctx, app, deployment, "compose pull", withOutput(err, output), &envState, prevComposeFiles)
 		return
@@ -205,7 +217,7 @@ func (s *Service) execute(app model.AppConfig, deployment *model.Deployment, rel
 	deployment.Status = model.StatusStarting
 	s.saveState(ctx, deployment)
 
-	output, err = s.executor.Exec(ctx, app.Dir, ComposeUpArgs(app, composeFiles))
+	output, err = s.executor.Exec(ctx, app.Dir, container.ComposeUpArgs(app, composeFiles))
 	if err != nil {
 		s.failDeployment(ctx, app, deployment, "compose up", withOutput(err, output), &envState, prevComposeFiles)
 		return
@@ -299,14 +311,14 @@ func (s *Service) failDeployment(ctx context.Context, app model.AppConfig, d *mo
 			if activeErr == nil {
 				activeFiles, discoverErr := s.releases.DiscoverComposeFiles(activePath)
 				if discoverErr == nil && len(activeFiles) > 0 {
-					if _, rbErr := s.executor.Exec(ctx, app.Dir, ComposeUpArgs(app, activeFiles)); rbErr != nil {
+					if _, rbErr := s.executor.Exec(ctx, app.Dir, container.ComposeUpArgs(app, activeFiles)); rbErr != nil {
 						s.logger.Error("rollback compose up failed", "app", d.AppName, "error", rbErr)
 						rollbackUpErr = rbErr
 					}
 				}
 			} else if len(prevComposeFiles) > 0 {
 				// Fall back to the compose files captured before deploy started.
-				if _, rbErr := s.executor.Exec(ctx, app.Dir, ComposeUpArgs(app, prevComposeFiles)); rbErr != nil {
+				if _, rbErr := s.executor.Exec(ctx, app.Dir, container.ComposeUpArgs(app, prevComposeFiles)); rbErr != nil {
 					s.logger.Error("rollback compose up failed", "app", d.AppName, "error", rbErr)
 					rollbackUpErr = rbErr
 				}

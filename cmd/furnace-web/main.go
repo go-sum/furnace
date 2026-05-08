@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/go-sum/furnace/internal/app"
+	"github.com/go-sum/furnace/internal/web"
 )
 
 // Version is set at build time via -ldflags "-X github.com/go-sum/furnace/cmd/furnace-web.Version=vX.Y.Z".
@@ -27,7 +27,7 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	logger.Info("furnace-web starting", "version", Version)
-	if err := app.Run(ctx, dbPath, listenAddr, logger); err != nil {
+	if err := web.Run(ctx, dbPath, listenAddr, logger); err != nil {
 		logger.Error("furnace-web exited", "error", err)
 		os.Exit(1)
 	}

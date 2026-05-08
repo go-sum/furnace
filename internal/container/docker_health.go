@@ -1,4 +1,4 @@
-package deploy
+package container
 
 import (
 	"context"
@@ -9,11 +9,6 @@ import (
 
 	"github.com/go-sum/furnace/internal/model"
 )
-
-// HealthChecker polls a container until it becomes healthy or the timeout elapses.
-type HealthChecker interface {
-	Check(ctx context.Context, container string, timeout time.Duration) error
-}
 
 // DockerAPIClient is the minimal Docker API surface needed for health checking.
 type DockerAPIClient interface {

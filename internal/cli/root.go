@@ -21,7 +21,6 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(
 		newInitCmd(),
 		newStartCmd(),
-		newWebCmd(),
 		newWorkerCmd(),
 		newProxyCmd(),
 		newResetCmd(),

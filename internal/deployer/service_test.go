@@ -1,4 +1,4 @@
-package deploy
+package deployer
 
 import (
 	"context"
@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/go-sum/furnace/internal/audit"
+	"github.com/go-sum/furnace/internal/container"
 	"github.com/go-sum/furnace/internal/model"
+	"github.com/go-sum/furnace/internal/release"
 	"github.com/go-sum/furnace/internal/storage"
 )
 
@@ -37,16 +39,16 @@ func (f *fakeExecutor) Exec(_ context.Context, _ string, args []string) ([]byte,
 }
 
 type fakeHealthChecker struct {
-	err              error
-	calledContainer  string
+	err             error
+	calledContainer string
 }
 
-func (f *fakeHealthChecker) Check(_ context.Context, container string, _ time.Duration) error {
-	f.calledContainer = container
+func (f *fakeHealthChecker) Check(_ context.Context, containerName string, _ time.Duration) error {
+	f.calledContainer = containerName
 	return f.err
 }
 
-func newTestService(t *testing.T, executor CommandExecutor, health HealthChecker) (*Service, string, *ReleaseManager) {
+func newTestService(t *testing.T, executor CommandExecutor, health HealthChecker) (*Service, string, *release.ReleaseManager) {
 	t.Helper()
 	dir := t.TempDir()
 	appDir := filepath.Join(dir, "apps", "testapp")
@@ -61,7 +63,7 @@ func newTestService(t *testing.T, executor CommandExecutor, health HealthChecker
 	store := storage.NewSQLiteDeploymentStore(db, slog.Default())
 	auditLogger, _ := audit.NewFileLogger(filepath.Join(dir, "audit"))
 	lock := NewFileLock(filepath.Join(dir, "locks"))
-	rm := NewReleaseManager(slog.Default())
+	rm := release.NewReleaseManager(slog.Default())
 
 	apps := map[string]model.AppConfig{
 		"testapp": {
@@ -106,7 +108,7 @@ func validRequest() model.DeployRequest {
 }
 
 // createTestRelease creates a release directory for the given digest in the app dir.
-func createTestRelease(t *testing.T, rm *ReleaseManager, appDir, digest string) {
+func createTestRelease(t *testing.T, rm *release.ReleaseManager, appDir, digest string) {
 	t.Helper()
 	stagingDir, err := rm.CreateStagingDir(appDir)
 	if err != nil {
@@ -417,7 +419,7 @@ func TestService_Start_RollbackComposeUpCalledAfterHealthFailure(t *testing.T) {
 	prevReleasePath := rm.ReleasePath(appDir, prevDigest)
 	prevComposeFiles := []string{filepath.Join(prevReleasePath, "docker-compose.yml")}
 	app := svc.apps["testapp"]
-	wantRollback := ComposeUpArgs(app, prevComposeFiles)
+	wantRollback := container.ComposeUpArgs(app, prevComposeFiles)
 	if !stringSlicesEqual(exec.calls[2], wantRollback) {
 		t.Fatalf("3rd exec call (rollback compose up):\ngot  %v\nwant %v", exec.calls[2], wantRollback)
 	}
@@ -561,7 +563,6 @@ func TestService_Start_RollbackComposeUpFailureRecordedInError(t *testing.T) {
 		t.Fatalf("error:\ngot  %q\nwant %q", d.Error, want)
 	}
 }
-
 
 type panicExecutor struct{}
 

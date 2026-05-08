@@ -1,4 +1,4 @@
-package deploy
+package container
 
 import (
 	"context"
@@ -7,10 +7,6 @@ import (
 	"os"
 	"os/exec"
 )
-
-type CommandExecutor interface {
-	Exec(ctx context.Context, dir string, args []string) ([]byte, error)
-}
 
 type DockerExecutor struct {
 	extraEnv []string

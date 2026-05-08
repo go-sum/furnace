@@ -1,4 +1,4 @@
-package app
+package web
 
 import (
 	"context"
@@ -14,8 +14,8 @@ import (
 	"github.com/go-sum/foundry/pkg/web/router"
 	"github.com/go-sum/foundry/pkg/web/serve"
 
-	"github.com/go-sum/furnace/internal/handler"
 	"github.com/go-sum/furnace/internal/storage"
+	"github.com/go-sum/furnace/internal/web/handler"
 )
 
 type App struct {

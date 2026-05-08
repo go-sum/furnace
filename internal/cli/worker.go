@@ -14,11 +14,14 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/spf13/cobra"
 
+	"github.com/go-sum/furnace/internal/artifact"
 	"github.com/go-sum/furnace/internal/audit"
+	"github.com/go-sum/furnace/internal/container"
 	"github.com/go-sum/furnace/internal/creds"
-	"github.com/go-sum/furnace/internal/deploy"
+	"github.com/go-sum/furnace/internal/deployer"
 	"github.com/go-sum/furnace/internal/model"
 	"github.com/go-sum/furnace/internal/registry"
+	"github.com/go-sum/furnace/internal/release"
 	"github.com/go-sum/furnace/internal/storage"
 	"github.com/go-sum/furnace/internal/verify"
 	"github.com/go-sum/furnace/internal/worker"
@@ -90,7 +93,7 @@ func newWorkerRunCmd() *cobra.Command {
 
 			var keychain authn.Keychain
 			var extraEnv []string
-			var executor *deploy.DockerExecutor
+			var executor *container.DockerExecutor
 			if token != "" {
 				keychain = creds.TokenKeychain(token)
 				dockerConfigDir, err := creds.CreateDockerConfigDir(token)
@@ -99,15 +102,15 @@ func newWorkerRunCmd() *cobra.Command {
 				}
 				defer creds.RemoveDockerConfigDir(dockerConfigDir)
 				extraEnv = []string{"DOCKER_CONFIG=" + dockerConfigDir}
-				executor = deploy.NewDockerExecutorWithEnv(extraEnv)
+				executor = container.NewDockerExecutorWithEnv(extraEnv)
 			} else {
-				executor = deploy.NewDockerExecutor()
+				executor = container.NewDockerExecutor()
 			}
 
 			reg := registry.NewClient(keychain)
 			verifier := verify.NewCLI(extraEnv)
-			composeFetcher := deploy.NewArtifactFetcher(verifier, keychain)
-			releases := deploy.NewReleaseManager(logger)
+			composeFetcher := artifact.NewArtifactFetcher(verifier, keychain)
+			releases := release.NewReleaseManager(logger)
 
 			dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 			if err != nil {
@@ -115,8 +118,8 @@ func newWorkerRunCmd() *cobra.Command {
 			}
 			defer dockerClient.Close()
 
-			lock := deploy.NewFileLock(filepath.Join(dataDir, "locks"))
-			health := deploy.NewDockerHealthChecker(dockerClient)
+			lock := deployer.NewFileLock(filepath.Join(dataDir, "locks"))
+			health := container.NewDockerHealthChecker(dockerClient)
 			store := storage.NewSQLiteDeploymentStore(db, logger)
 
 			auditLogger, err := audit.NewFileLogger(filepath.Join(dataDir, "audit"))
@@ -124,7 +127,7 @@ func newWorkerRunCmd() *cobra.Command {
 				return fmt.Errorf("create audit logger: %w", err)
 			}
 
-			svc := deploy.NewService(deploy.ServiceConfig{
+			svc := deployer.NewService(deployer.ServiceConfig{
 				Apps:     apps,
 				Executor: executor,
 				Lock:     lock,
